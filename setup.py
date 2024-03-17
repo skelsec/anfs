@@ -40,7 +40,7 @@ setup(
 	install_requires=[
 		'unicrypto>=0.0.10',
 		'asyauth>=0.0.20',
-		'asysocks>=0.2.11',
+		'asysocks>=0.2.12',
 		'prompt-toolkit>=3.0.2',
 		'tqdm',
 		'colorama',

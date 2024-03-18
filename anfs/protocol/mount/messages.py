@@ -5,9 +5,17 @@ MNTPATHLEN = 1024
 MNTNAMLEN = 255
 FHSIZE = 32
 
-def read_str(buf):
+def read_str(buf:io.BytesIO, encoding:str='utf-8'):
     sl = int.from_bytes(buf.read(4), byteorder='big', signed=False)
-    return buf.read(sl).decode('utf-8')
+    data = buf.read(sl).decode(encoding)
+    if sl%4 != 0:
+        buf.read(4 - sl%4)
+    return data
+
+def pack_str(data:str, encoding:str='utf-8'):
+    data = data.encode(encoding)
+    padding =  b'' if len(data) % 4 == 0 else b'\x00' * (4 - len(data)%4)
+    return len(data).to_bytes(4, byteorder='big', signed=False) + data + padding
 
 class export:
     def __init__(self):

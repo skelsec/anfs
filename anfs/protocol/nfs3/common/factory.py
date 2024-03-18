@@ -51,6 +51,7 @@ class NFS3ConnectionFactory:
 		"""
 
 		target = self.get_target()
+		target.port = 111
 		cred = self.get_credential()
 		return Portmap(target, cred)
 	

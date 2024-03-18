@@ -323,15 +323,23 @@ class NFSClientConsole(aiocmd.PromptToolkitCmd):
 			traceback.print_exc()
 			return False
 
-	async def do_test(self, linkname:str):
-		"""Changes the current directory"""
-		if linkname not in self.__current_files:
-			print('File not found!')
+	async def do_services(self):
+		try:
+			portmap = self.conn_url.get_portmap()
+			_, err = await portmap.connect()
+			if err is not None:
+				raise err
+			programs, err = await portmap.dump()
+			if err is not None:
+				raise err
+			
+			for service in programs:
+				print(service)
+				await asyncio.sleep(0)
+			return True
+		except Exception as e:
+			traceback.print_exc()
 			return False
-		
-		self.__current_dir_handle = self.__current_files[linkname].handle
-		await self.do_refreshcurrentdir()
-		return True
 
 async def amain(args):
 	client = NFSClientConsole(args.url)

@@ -1,8 +1,7 @@
 from anfs.protocol.rpc import RPC
 import traceback
-import struct
 import io
-from anfs.protocol.mount.messages import export, fhstatus, mountpoint
+from anfs.protocol.mount.messages import export, fhstatus, mountpoint, pack_str
 
 # https://datatracker.ietf.org/doc/html/rfc1094#appendix-A
 
@@ -29,8 +28,7 @@ class Mount:
 	async def mount(self, path):
 		"""Mount a directory"""
 		try:
-			data = path.encode('utf-8')
-			data = len(data).to_bytes(4, byteorder='big', signed=False) + data
+			data = pack_str(path)
 			res, err = await self.rpc.call(100005, 3, 1, data)
 			if err is not None:
 				raise err
@@ -60,8 +58,7 @@ class Mount:
 	
 	async def umount(self, path):
 		"""Unmount a directory"""
-		data = path.encode('utf-8')
-		data = len(data).to_bytes(4, byteorder='big', signed=False) + data
+		data = pack_str(path)
 		res, err = await self.rpc.call(100005, 1, 3, data)
 		if err is not None:
 			raise err

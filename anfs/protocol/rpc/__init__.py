@@ -80,7 +80,7 @@ class RPC:
 
 	async def disconnect(self):
 		if self.connection is not None:
-			await self.connection.disconnect()
+			await self.connection.close()
 	
 	async def __send(self, data):
 		dsize = len(data)

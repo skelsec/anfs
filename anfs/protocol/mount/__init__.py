@@ -11,6 +11,15 @@ class Mount:
 		self.credential = credential
 		self.rpc = None
 	
+	async def __aenter__(self):
+		_, err = await self.connect()
+		if err is not None:
+			raise err
+		return self
+	
+	async def __aexit__(self, exc_type, exc, tb):
+		await self.disconnect()
+	
 	async def connect(self):
 		self.rpc = RPC(self.target, self.credential)
 		return await self.rpc.connect(100005, 1)

@@ -42,6 +42,15 @@ class NFSv3Client:
 		}
 		self.__parent_handles = {}
 
+	async def __aenter__(self):
+		_, err = await self.connect()
+		if err is not None:
+			raise err
+		return self
+	
+	async def __aexit__(self, exc_type, exc, tb):
+		await self.disconnect()
+
 	def handle_to_path(self, handle, parts=None):
 		if isinstance(handle, int):
 			handle = self.__handles[handle]
@@ -78,6 +87,10 @@ class NFSv3Client:
 			return await self.rpc.connect(NFS_PROGRAM, NFS_V3)
 		except Exception as e:
 			return False, e
+		
+	async def disconnect(self):
+		if self.rpc is not None:
+			return await self.rpc.disconnect()
 
 	async def nfs_request(self, procedure, args):
 		return await self.rpc.call(NFS_PROGRAM, NFS_V3, procedure, args)

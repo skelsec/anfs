@@ -502,23 +502,24 @@ class NFSv3Client:
 
 		except Exception as e:
 			yield False, e
-
+	
+	# This version was provided by PTG
+	# The original version was not working properly
 	async def readdirplus(self, dir_handle, cookie=0, cookie_verf='0', dircount=4096, maxcount=32768):
 		try:
-			dir_handle = self.__handles[dir_handle]
+			real_dir_handle = self.__handles[dir_handle]
 			packer = nfs_pro_v3Packer()
-			packer.pack_readdirplus3args(readdirplus3args(dir=nfs_fh3(dir_handle),
-														cookie=cookie,
-														cookieverf=cookie_verf.encode(),
-														dircount=dircount,
-														maxcount=maxcount))
-
+			packer.pack_readdirplus3args(readdirplus3args(dir=nfs_fh3(real_dir_handle),
+				cookie=cookie,
+				cookieverf=cookie_verf.encode(),
+				dircount=dircount,
+				maxcount=maxcount)
+			)
+			
 			logger.debug("NFSv3 procedure %d: READDIRPLUS on %s" % (NFS3_PROCEDURE_READDIRPLUS, self.host))
 			res, err = await self.nfs_request(NFS3_PROCEDURE_READDIRPLUS, packer.get_buffer())
 			if err is not None:
 				raise err
-
-			
 			unpacker = nfs_pro_v3Unpacker(res)
 			fl = unpacker.unpack_readdirplus3res(data_format='')
 			if fl.status != 0:
@@ -528,19 +529,54 @@ class NFSv3Client:
 			for entry in nextiter(fl.resok.reply.entries):
 				last_cookie = entry['cookie']
 				entry, realhandle = NFSFileEntry.from_dict(entry, encoding=self.encoding)
-				entry.handle = self.register_handle(realhandle, entry.name, dir_handle)
-
+				entry.handle = self.register_handle(realhandle, entry.name, real_dir_handle)
 				yield entry, None
-			
+						   
 			if fl.resok.reply.eof is False:
 				async for entry, err in self.readdirplus(dir_handle, last_cookie, cookie_verf, dircount, maxcount):
-					entry, realhandle = NFSFileEntry.from_dict(entry, encoding=self.encoding)
-					entry.handle = self.register_handle(realhandle, entry.name, dir_handle)
 					yield entry, err
 
 		except Exception as e:
 			yield False, e
 
+	#async def readdirplus(self, dir_handle, cookie=0, cookie_verf='0', dircount=4096, maxcount=32768):
+	#	try:
+	#		dir_handle = self.__handles[dir_handle]
+	#		packer = nfs_pro_v3Packer()
+	#		packer.pack_readdirplus3args(readdirplus3args(dir=nfs_fh3(dir_handle),
+	#													cookie=cookie,
+	#													cookieverf=cookie_verf.encode(),
+	#													dircount=dircount,
+	#													maxcount=maxcount))
+	#
+	#		logger.debug("NFSv3 procedure %d: READDIRPLUS on %s" % (NFS3_PROCEDURE_READDIRPLUS, self.host))
+	#		res, err = await self.nfs_request(NFS3_PROCEDURE_READDIRPLUS, packer.get_buffer())
+	#		if err is not None:
+	#			raise err
+	#
+	#		
+	#		unpacker = nfs_pro_v3Unpacker(res)
+	#		fl = unpacker.unpack_readdirplus3res(data_format='')
+	#		if fl.status != 0:
+	#			raise NFSAccessError(fl.status)
+	#		
+	#		last_cookie = 0
+	#		for entry in nextiter(fl.resok.reply.entries):
+	#			last_cookie = entry['cookie']
+	#			entry, realhandle = NFSFileEntry.from_dict(entry, encoding=self.encoding)
+	#			entry.handle = self.register_handle(realhandle, entry.name, dir_handle)
+	#
+	#			yield entry, None
+	#		
+	#		if fl.resok.reply.eof is False:
+	#			async for entry, err in self.readdirplus(dir_handle, last_cookie, cookie_verf, dircount, maxcount):
+	#				entry, realhandle = NFSFileEntry.from_dict(entry, encoding=self.encoding)
+	#				entry.handle = self.register_handle(realhandle, entry.name, dir_handle)
+	#				yield entry, err
+	#
+	#	except Exception as e:
+	#		yield False, e
+	#
 	
 	async def fsstat(self, file_handle, auth=None):
 		try:

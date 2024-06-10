@@ -267,7 +267,7 @@ class NFSv3Client:
 											offset=offset,
 											count=count,
 											stable=stable_how,
-											data=content.encode()))
+											data=content))
 
 			logger.debug("NFSv3 procedure %d: WRITE on %s" % (NFS3_PROCEDURE_WRITE, self.host))
 			res, err = await self.nfs_request(NFS3_PROCEDURE_WRITE, packer.get_buffer())

@@ -1826,7 +1826,7 @@ class NFSFileEntry:
 		realhandle = None
 		try:
 			realhandle = data['name_handle']['handle']['data']
-		except KeyError:
+		except (KeyError, TypeError):
 			pass
 
 		res = NFSFileEntry()

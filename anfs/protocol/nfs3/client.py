@@ -41,6 +41,9 @@ class NFSv3Client:
 			root_handle: '/'
 		}
 		self.__parent_handles = {}
+		self.__handle_reverse_map = {
+			root_handle : 0
+		}
 
 	async def __aenter__(self):
 		_, err = await self.connect()
@@ -70,9 +73,10 @@ class NFSv3Client:
 	def register_handle(self, handle, name, parent_handle):
 		if handle is None:
 			return None
-		if handle in self.__handles:
-			return self.__handles[handle]
+		if handle in self.__handle_reverse_map:
+			return self.__handle_reverse_map[handle]
 		self.__handles[self.__handle_id] = handle
+		self.__handle_reverse_map[handle] = self.__handle_id
 		self.__handle_id += 1
 		rethandle = self.__handle_id - 1
 		if name == '.' or name == '..':

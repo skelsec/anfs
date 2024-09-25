@@ -509,13 +509,13 @@ class NFSv3Client:
 	
 	# This version was provided by PTG
 	# The original version was not working properly
-	async def readdirplus(self, dir_handle, cookie=0, cookie_verf='0', dircount=4096, maxcount=32768):
+	async def readdirplus(self, dir_handle, cookie=0, cookie_verf=b'\x00', dircount=4096, maxcount=32768):
 		try:
 			real_dir_handle = self.__handles[dir_handle]
 			packer = nfs_pro_v3Packer()
 			packer.pack_readdirplus3args(readdirplus3args(dir=nfs_fh3(real_dir_handle),
 				cookie=cookie,
-				cookieverf=cookie_verf.encode(),
+				cookieverf=cookie_verf,
 				dircount=dircount,
 				maxcount=maxcount)
 			)
@@ -530,6 +530,7 @@ class NFSv3Client:
 				raise NFSAccessError(fl.status)
 			
 			last_cookie = 0
+			last_cookie_verf = fl.resok.cookieverf
 			for entry in nextiter(fl.resok.reply.entries):
 				last_cookie = entry['cookie']
 				entry, realhandle = NFSFileEntry.from_dict(entry, encoding=self.encoding)
@@ -537,7 +538,7 @@ class NFSv3Client:
 				yield entry, None
 						   
 			if fl.resok.reply.eof is False:
-				async for entry, err in self.readdirplus(dir_handle, last_cookie, cookie_verf, dircount, maxcount):
+				async for entry, err in self.readdirplus(dir_handle, last_cookie, last_cookie_verf, dircount, maxcount):
 					yield entry, err
 
 		except Exception as e:

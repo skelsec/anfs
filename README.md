@@ -15,3 +15,4 @@ Using lower ports is only allowed if you run the client as a high privileged use
 
 # Kudos
 The NFSv3 structure encoding/decoding is taken from [NfsClient](https://github.com/CharmingYang0/NfsClient).
+@philipp-tg for the copious amount of bugfixes

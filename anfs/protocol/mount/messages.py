@@ -80,3 +80,24 @@ class mountpoint:
     
     def __str__(self):
         return 'Hostname: %s, Directory: %s' % (self.hostname, self.directory)
+    
+    def to_smbshare(self, hostname_or_ip):
+        fullpath = '%s%s' % (hostname_or_ip, self.directory)
+        return NFSSMBShare(name=self.directory, stype='mount', remark=None, fullpath=fullpath)
+    
+class NFSSMBShare:
+    # only used for scanner results output, do not use for anything else
+	def __init__(self, name = None, stype = None, remark = None, fullpath = None):
+		self.fullpath = fullpath
+		self.unc_path = fullpath
+		self.name = name
+		self.type = stype
+		self.remark = remark
+		self.flags = None
+		self.capabilities = None
+		self.maximal_access = None
+		self.tree_id = None
+		self.security_descriptor = None
+		
+		self.files = {}
+		self.subdirs = {}

@@ -9,7 +9,7 @@ rpctarget_url_params = {
 }
 
 class RPCTarget(UniTarget):
-	def __init__(self, ip, port = 0, protocol = UniProto.CLIENT_TCP, proxies = None, timeout = 10, dns:str=None, dc_ip:str = None, domain:str = None, hostname:str = None, ssl_ctx = None, use_privileged_source_port:bool=False, fragsize = 10*1024):
+	def __init__(self, ip, port = 0, protocol = UniProto.CLIENT_TCP, proxies = None, timeout = 10, dns:str=None, dc_ip:str = None, domain:str = None, hostname:str = None, ssl_ctx = None, use_privileged_source_port:bool=False, fragsize = 1048576):
 		UniTarget.__init__(self, ip, port, protocol, timeout, hostname = hostname, ssl_ctx= ssl_ctx, proxies = proxies, domain = domain, dc_ip = dc_ip, dns=dns, use_privileged_source_port=use_privileged_source_port)
 		self.fragsize = fragsize
 	

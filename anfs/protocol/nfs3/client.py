@@ -544,6 +544,36 @@ class NFSv3Client:
 		except Exception as e:
 			yield False, e
 
+	async def enumall(self, dir_handle = 0, depth = 3):
+		try:
+			curpath = self.handle_to_path(dir_handle)
+			if depth == 0:
+				return
+			
+			async for entry, err in self.readdirplus(dir_handle):
+				if err is not None:
+					raise err
+				#print(str(entry))
+				entrypath = curpath + '/' + entry.name
+				if entry.type == 2:
+					if entry.name == '.' or entry.name == '..':
+						continue
+					yield entrypath, 'dir', entry, None
+					async for epath, etype, ee, err in self.enumall(entry.handle, depth - 1):
+						yield epath, etype, ee, err
+						if err is not None:
+							break
+				elif entry.type == 5:
+					# TODO: Implement symlink handling
+					yield entrypath, 'symlink', entry, None
+				else:
+					yield entrypath, 'file', entry, None
+		except Exception as e:
+			yield None, None, None, e
+				
+				
+
+
 	#async def readdirplus(self, dir_handle, cookie=0, cookie_verf='0', dircount=4096, maxcount=32768):
 	#	try:
 	#		dir_handle = self.__handles[dir_handle]
@@ -663,6 +693,19 @@ async def amain():
 	if err is not None:
 		raise err
 	print(fhandle)
+	
+	nfs = NFSv3Client(fhandle, target, cred)
+	_, err = await nfs.connect()
+	if err is not None:
+		raise err
+	
+	async for epath, etype, ee, err in nfs.enumall():
+		if err is not None:
+			print(err)
+		print(epath)
+	
+	
+	return
 	nfs = NFSv3(fhandle, target, cred)
 	_, err = await nfs.connect()
 	if err is not None:

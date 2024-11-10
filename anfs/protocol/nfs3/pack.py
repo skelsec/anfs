@@ -1871,7 +1871,47 @@ class NFSFileEntry:
 		
 		formatted_line = "{:<10s} {:>2} {:<4} {:<4} {:>5} {:<12}  {}".format(*t)
 		return formatted_line
-		
+	
+	def to_smbfile(self, mountpoint_name, path_to_file):
+		#returns an SMBfile-like object
+		return NFSSMBFile.from_nfsfileentry(self, mountpoint_name, path_to_file)
+
+class NFSSMBFile:
+	# this is a class that is used to represent a file in the SMB protocol
+	# do not use this, only here to support scanner results
+	def __init__(self):
+		self.tree_id = None
+		self.parent_dir = None
+		self.fullpath:str = None
+		self.unc_path:str = None
+		self.share_path:str = None
+		self.name:str = None
+		self.size:int = None
+		self.creation_time:datetime.datetime = None
+		self.last_access_time:datetime.datetime = None
+		self.last_write_time:datetime.datetime = None
+		self.change_time:datetime.datetime = None
+		self.allocation_size:datetime.datetime = None
+		self.attributes = None
+		self.file_id:int = None
+		self.security_descriptor = None
+	
+	@staticmethod
+	def from_nfsfileentry(entry, mountpoint_name, path_to_file):
+		res = NFSSMBFile()
+		res.fullpath = f"{path_to_file}/{entry.name}"
+		res.share_path = mountpoint_name
+		res.unc_path = f"{mountpoint_name}:{path_to_file}/{entry.name}"
+		res.name = entry.name
+		res.size = entry.size
+		res.creation_time = entry.ctime
+		res.last_access_time = entry.atime
+		res.last_write_time = entry.mtime
+		res.change_time = entry.mtime
+		res.file_id = entry.fileid
+		res.allocation_size = entry.used
+		#res.attributes = entry.mode
+		return res
 	
 def format_datetime_like_ls(dt):
 	"""Format a datetime object like the ls command output."""

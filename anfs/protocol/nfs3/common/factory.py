@@ -89,6 +89,17 @@ class NFS3ConnectionFactory:
 		cred = self.get_credential()
 		target = self.get_target()
 		return RPC(target, cred)
+	
+	def create_factory_newtarget(self, ip_or_hostname):
+		"""
+		Creates a connection that can be used to interface with the server
+		
+		:return: A new factory object
+		:rtype: :class:`NFS3ConnectionFactory`
+		"""
+		target = self.target.get_newtarget(ip_or_hostname, 0)
+		cred = self.get_credential()
+		return NFS3ConnectionFactory(credential = cred, target = target)
 		
 	def __str__(self):
 		t = '==== NFSConnectionFactory ====\r\n'

@@ -144,7 +144,7 @@ class NFSv3Client:
 			response = unpacker.unpack_getattr3res()
 			
 			if response['status'] != 0:
-				raise NFSAccessError(response.status)
+				raise NFSAccessError(response['status'])
 
 			fe = NFSFileEntry.from_attrs(response['attributes'])
 			fe.handle = ofh
@@ -217,7 +217,7 @@ class NFSv3Client:
 			response = unpacker.unpack_access3res()
 
 			if response['status'] != 0:
-				raise NFSAccessError(response.status)
+				raise NFSAccessError(response['status'])
 
 			return response['resok']['access'], None
 		except Exception as e:
@@ -256,7 +256,7 @@ class NFSv3Client:
 			unpacker = nfs_pro_v3Unpacker(data)
 			response = unpacker.unpack_read3res()
 			if response['status'] != 0:
-				raise NFSAccessError(response.status)
+				raise NFSAccessError(response['status'])
 			
 			return response['resok']['data'], None
 
@@ -302,7 +302,7 @@ class NFSv3Client:
 			unpacker = nfs_pro_v3Unpacker(data)
 			response = unpacker.unpack_create3res()
 			if response['status'] != 0:
-				raise NFSAccessError(response.status)
+				raise NFSAccessError(response['status'])
 			
 			entry = NFSFileEntry.from_attrs(response['resok']['obj_attributes']['attributes'])
 			entry.name = file_name
@@ -329,7 +329,7 @@ class NFSv3Client:
 			unpacker = nfs_pro_v3Unpacker(res)
 			response = unpacker.unpack_mkdir3res()
 			if response['status'] != 0:
-				raise NFSAccessError(response.status)
+				raise NFSAccessError(response['status'])
 			
 			entry = NFSFileEntry.from_attrs(response['resok']['obj_attributes']['attributes'])
 			entry.name = dir_name
@@ -408,7 +408,7 @@ class NFSv3Client:
 			unpacker = nfs_pro_v3Unpacker(res)
 			response = unpacker.unpack_remove3res()
 			if response['status'] != 0:
-				raise NFSAccessError(response.status)
+				raise NFSAccessError(response['status'])
 			return True, None
 		except Exception as e:
 			return False, e
@@ -427,7 +427,7 @@ class NFSv3Client:
 			unpacker = nfs_pro_v3Unpacker(res)
 			response = unpacker.unpack_rmdir3res()
 			if response['status'] != 0:
-				raise NFSAccessError(response.status)
+				raise NFSAccessError(response['status'])
 
 			return True, None
 		except Exception as e:

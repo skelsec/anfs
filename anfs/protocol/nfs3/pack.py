@@ -1,6 +1,10 @@
 import struct
-from xdrlib import Packer, Unpacker, ConversionError
-from xdrlib import Error as XDRError
+try:
+	from xdrlib import Packer, Unpacker, ConversionError
+	from xdrlib import Error as XDRError
+except:
+	from xdrlib3 import Packer, Unpacker, ConversionError
+	from xdrlib3 import Error as XDRError
 import anfs.protocol.nfs3.messages as const
 from anfs.protocol.nfs3 import rtypes as types
 import datetime

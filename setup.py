@@ -46,6 +46,7 @@ setup(
 		'colorama',
 		'asn1crypto',
 		'wcwidth',
+		'xdrlib3; python_version>="3.13"',
 	],
 	
 	classifiers=[

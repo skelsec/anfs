@@ -1869,7 +1869,25 @@ class NFSFileEntry:
 		else:
 			t.append(self.name)
 		
-		formatted_line = "{:<10s} {:>2} {:<4} {:<4} {:>5} {:<12}  {}".format(*t)
+		# sometimes elements are None
+		res = []
+		for i, entry in enumerate(t):
+			if entry is None:
+				m = 5
+				if i == 0:
+					m = 10
+				elif i == 1:
+					m = 2
+				elif i in [2, 3]:
+					m = 4
+				elif i == 4:
+					m = 5
+				else:
+					m = 12
+				entry = '?' * m
+			res.append(str(entry))
+		
+		formatted_line = "{:<10s} {:>2} {:<4} {:<4} {:>5} {:<12}  {}".format(*res)
 		return formatted_line
 	
 	def to_smbfile(self, mountpoint_name, path_to_file):

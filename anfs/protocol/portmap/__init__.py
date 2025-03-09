@@ -5,6 +5,7 @@ import struct
 import io
 import datetime
 
+
 # https://www.rfc-editor.org/rfc/rfc1833.html
 # TODO: Implement the rest of the portmap protocol, as many functions missing
 
@@ -99,6 +100,14 @@ class Portmap:
             return curtime, None
         except Exception as e:
             return None, e
+        
+    async def get_target_for_porgram(self, basetarget, program, version, protocol):
+        try:
+            port = await self.getport(program, version, protocol)
+            return basetarget.get_newport(port), None
+        except Exception as e:
+            return None, e
+
         
 
 async def amain():

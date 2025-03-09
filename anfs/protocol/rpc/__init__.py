@@ -36,7 +36,6 @@ class RPC:
 				else:
 					raise Exception('Received a CALL message, expected a REPLY message')
 		except Exception as e:
-			traceback.print_exc()
 			await self.disconnect()
 
 	def next_xid(self):
@@ -79,8 +78,12 @@ class RPC:
 			return False, e
 
 	async def disconnect(self):
+		if self.__read_task is not None:
+			self.__read_task.cancel()
+			self.__read_task = None
 		if self.connection is not None:
 			await self.connection.close()
+			self.connection = None
 	
 	async def __send(self, data):
 		dsize = len(data)

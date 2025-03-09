@@ -9,6 +9,21 @@ class NFSFileRes:
 		self.otype = otype
 		self.err = err
 
+		try:
+			self.size = self.obj.size
+			self.sizefmt = NFSFileRes.sizeof_fmt(self.size)
+		except:
+			self.size = 0
+		try:
+			self.creationtime = self.obj.creation_time.isoformat()
+		except:
+			self.creationtime = ''
+		try:
+			self.unc_path = str(self.obj.unc_path)
+		except:
+			self.unc_path = ''
+		
+
 	# https://stackoverflow.com/questions/1094841/get-human-readable-version-of-file-size
 	@staticmethod
 	def sizeof_fmt(num, suffix='B'):
@@ -25,57 +40,70 @@ class NFSFileRes:
 
 	def to_line(self, separator = '\t'):
 		if self.err is not None:
-			unc_path = ''
-			try:
-				unc_path = str(self.obj.unc_path)
-			except:
-				pass
 			return separator.join([
 				'err',
-				unc_path,
+				self.unc_path,
 				str(self.err)
 			])
-
-		unc_path = ''
-		creationtime = ''
-		size = ''
-		sizefmt = ''
-		if self.otype in ['dir', 'file', 'mount']:
-			unc_path = str(self.obj.unc_path)
-			if self.otype == 'dir' or self.otype == 'file' or self.otype == 'mount':
-				if self.otype == 'dir' or self.otype == 'file':
-					if self.obj.creation_time is not None:
-						creationtime = self.obj.creation_time.isoformat()
-			
-			if self.otype == 'file':
-				size = self.obj.size
-				sizefmt = NFSFileRes.sizeof_fmt(size)
 
 		if self.otype == 'file':
 			return separator.join([
 				'file',
-				unc_path,
-				creationtime,
-				str(size), 
-				sizefmt,
+				self.unc_path,
+				self.creationtime,
+				str(self.size), 
+				self.sizefmt,
 			])
 		if self.otype == 'dir' or self.otype == 'symlink':
 			return separator.join([
 				self.otype,
-				unc_path, 
-				creationtime, 
+				self.unc_path, 
+				self.creationtime, 
 			])
 		if self.otype == 'mount':
 			return separator.join([
 				'mount',
-				unc_path,
+				self.unc_path,
 			])
 		else:
 			return separator.join([
 				self.otype,
-				unc_path,
-				creationtime,
+				self.unc_path,
+				self.creationtime,
 			])
+	def to_dict(self):
+		if self.err is not None:
+			return {
+				'otype' : 'err',
+				'path' : str(self.unc_path),
+				'err' : str(self.err)
+			}
+
+		if self.otype == 'file':
+			return {
+				'otype' : 'file',
+				'path' : str(self.unc_path),
+				'creationtime' : self.creationtime,
+				'size' : str(self.size),
+				'sizefmt' : self.sizefmt,
+			}
+		if self.otype == 'dir' or self.otype == 'symlink':
+			return {
+				'otype' : self.otype,
+				'path' : self.unc_path,
+				'creationtime' : self.creationtime,
+			}
+		if self.otype == 'mount':
+			return {
+				'otype' : 'mount',
+				'path' : self.unc_path,
+			}
+		else:
+			return {
+				'otype' : self.otype,
+				'path' : self.unc_path,
+				'creationtime' : self.creationtime,
+			}
 
 class NFS3FileScanner:
 	def __init__(self, 
@@ -91,33 +119,25 @@ class NFS3FileScanner:
 	async def run(self, targetid, target, out_queue):
 		try:
 			newfactory = self.factory.create_factory_newtarget(target)
-			mount = newfactory.get_mount()
-			_, err = await mount.connect()
-			if err is not None:
-				raise err
-			
-			mountpoints, err = await mount.dump()
-			if err is not None:
-				raise err
-			
-			mounts = {}
-			for mountpoint in mountpoints:
-				mounts[mountpoint.directory] = mountpoint
-
-			for mountpoint in mounts:
-				await out_queue.put(ScannerData(target, NFSFileRes(mounts[mountpoint].to_smbshare(target), 'mount', None)))
-
-				mhandle, err = await mount.mount(mountpoint)
-				if err is not None:
-					raise err
-
-				nfs = newfactory.get_client(mhandle)
-				_, err = await nfs.connect()
+			async with newfactory.get_mount() as mount:				
+				mountpoints, err = await mount.dump()
 				if err is not None:
 					raise err
 				
-				async for epath, etype, entry, err in nfs.enumall(0, depth=self.depth):
-					await out_queue.put(ScannerData(target, NFSFileRes(entry.to_smbfile(mountpoint, epath), etype, err)))
+				mounts = {}
+				for mountpoint in mountpoints:
+					mounts[mountpoint.directory] = mountpoint
+
+				for mountpoint in mounts:
+					await out_queue.put(ScannerData(target, NFSFileRes(mounts[mountpoint].to_smbshare(target), 'mount', None)))
+
+					mhandle, err = await mount.mount(mountpoint)
+					if err is not None:
+						raise err
+
+					async with newfactory.get_client(mhandle) as nfs:
+						async for epath, etype, entry, err in nfs.enumall(0, depth=self.depth):
+							await out_queue.put(ScannerData(target, NFSFileRes(entry.to_smbfile(mountpoint, epath), etype, err)))
 
 		except Exception as e:
 			await out_queue.put(ScannerError(target, e))

@@ -544,7 +544,7 @@ class NFSv3Client:
 		except Exception as e:
 			yield False, e
 
-	async def enumall(self, dir_handle = 0, depth = 3):
+	async def enumall(self, dir_handle = 0, depth = 3, filter_cb = None):
 		try:
 			curpath = self.handle_to_path(dir_handle)
 			if depth == 0:
@@ -555,19 +555,36 @@ class NFSv3Client:
 					raise err
 				#print(str(entry))
 				entrypath = curpath + '/' + entry.name
-				if entry.type == 2:
+				if entry.type == 5:
+					# TODO: Implement symlink handling
+					yield entrypath, 'symlink', entry, None
+				elif entry.type == 1:
+					yield entrypath, 'file', entry, None
+
+				elif entry.type == 2:
 					if entry.name == '.' or entry.name == '..':
 						continue
 					yield entrypath, 'dir', entry, None
-					async for epath, etype, ee, err in self.enumall(entry.handle, depth - 1):
+					if filter_cb is not None:
+						tograb = await filter_cb(entrypath, entry)
+						if tograb is False:
+							continue
+
+					async for epath, etype, ee, err in self.enumall(dir_handle = entry.handle, depth=depth - 1, filter_cb=filter_cb):
 						yield epath, etype, ee, err
 						if err is not None:
 							break
-				elif entry.type == 5:
-					# TODO: Implement symlink handling
-					yield entrypath, 'symlink', entry, None
 				else:
-					yield entrypath, 'file', entry, None
+					# currently not supported types
+					#Type 1: Regular File
+					#Type 2: Directory
+					#Type 3: Block Special Device
+					#Type 4: Character Special Device
+					#Type 5: Symbolic Link
+					#Type 6: Socket
+					#Type 7: Named Pipe (FIFO)
+					#Type 8: Unknown Type (usually for files with unknown types)
+					continue
 		except Exception as e:
 			yield None, None, None, e
 				

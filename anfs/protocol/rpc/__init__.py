@@ -64,6 +64,7 @@ class RPC:
 				if err is not None:
 					return False, err
 				port, err = await self.__portmap.getport(program, version, protocol)
+				await self.__portmap.disconnect()
 				if err is not None:
 					return False, err
 				self.target = self.target.get_newtarget(self.target.ip, port)
@@ -101,7 +102,7 @@ class RPC:
 			fragment = rpc_fragment_header.to_bytes(4, byteorder='big', signed=False) + fragment
 			await self.connection.write(fragment)
 	
-	async def call(self, program, version, procedure, data):
+	async def call(self, program, version, procedure, data, credential = None):
 		xid, xid_queue = await self.register_xid(self.next_xid())
 		try:
 			call = rpc_msg()
@@ -112,7 +113,7 @@ class RPC:
 			call.body.prog = program
 			call.body.vers = version
 			call.body.proc = procedure
-			call.body.cred = self.credential
+			call.body.cred = self.credential if credential is None else credential
 			call.body.verf = AUTH_NULL() # for both auth null and auth sys, the verifier is null
 			call.body.data = data
 			

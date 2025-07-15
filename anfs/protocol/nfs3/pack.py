@@ -1894,9 +1894,9 @@ class NFSFileEntry:
 		formatted_line = "{:<10s} {:>2} {:<4} {:<4} {:>5} {:<12}  {}".format(*res)
 		return formatted_line
 	
-	def to_smbfile(self, mountpoint_name, path_to_file):
+	def to_smbfile(self, host_name, mountpoint_name, path_to_file):
 		#returns an SMBfile-like object
-		return NFSSMBFile.from_nfsfileentry(self, mountpoint_name, path_to_file)
+		return NFSSMBFile.from_nfsfileentry(self, host_name, mountpoint_name, path_to_file)
 
 class NFSSMBFile:
 	# this is a class that is used to represent a file in the SMB protocol
@@ -1917,13 +1917,15 @@ class NFSSMBFile:
 		self.attributes = None
 		self.file_id:int = None
 		self.security_descriptor = None
+
+		self.nfs_file = None
 	
 	@staticmethod
-	def from_nfsfileentry(entry, mountpoint_name, path_to_file):
+	def from_nfsfileentry(entry, host_name, mountpoint_name, path_to_file):
 		res = NFSSMBFile()
-		res.fullpath = f"{path_to_file}/{entry.name}"
+		res.fullpath = f"{path_to_file}"
 		res.share_path = mountpoint_name
-		res.unc_path = f"{mountpoint_name}:{path_to_file}/{entry.name}"
+		res.unc_path = f"{host_name}/{mountpoint_name}/{path_to_file}"
 		res.name = entry.name
 		res.size = entry.size
 		res.creation_time = entry.ctime
@@ -1932,6 +1934,7 @@ class NFSSMBFile:
 		res.change_time = entry.mtime
 		res.file_id = entry.fileid
 		res.allocation_size = entry.used
+		res.nfs_file = entry
 		#res.attributes = entry.mode
 		return res
 	

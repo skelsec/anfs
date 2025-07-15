@@ -39,6 +39,10 @@ class export:
     def __str__(self):
         return 'Filesystem: %s, Groups: %s' % (self.filesys, self.groups)
     
+    def to_smbshare(self, hostname_or_ip):
+        fullpath = '%s%s' % (hostname_or_ip, self.filesys)
+        return NFSSMBShare(name=self.filesys, stype='mount', remark=None, fullpath=fullpath)
+    
 class fhstatus:
     def __init__(self):
         self.status = None

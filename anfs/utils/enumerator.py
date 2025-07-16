@@ -1,6 +1,7 @@
 from asysocks.unicomm.common.scanner.targetgen import UniTargetGen, UniCredentialGen
 from asysocks.unicomm.common.scanner.scanner import UniScanner
 from anfs.protocol.nfs3.common.factory import NFS3ConnectionFactory
+from anfs.protocol.nfs3.client import NFSAccessError
 from asysocks.unicomm.common.scanner.common import *
 
 class NFSFileRes:
@@ -120,13 +121,13 @@ class NFS3FileScanner:
 		try:
 			newfactory = self.factory.create_factory_newtarget(target)
 			async with newfactory.get_mount() as mount:				
-				mountpoints, err = await mount.dump()
+				mountpoints, err = await mount.export()
 				if err is not None:
 					raise err
 				
 				mounts = {}
 				for mountpoint in mountpoints:
-					mounts[mountpoint.directory] = mountpoint
+					mounts[mountpoint.filesys] = mountpoint
 
 				for mountpoint in mounts:
 					await out_queue.put(ScannerData(target, NFSFileRes(mounts[mountpoint].to_smbshare(target), 'mount', None)))
@@ -137,7 +138,10 @@ class NFS3FileScanner:
 
 					async with newfactory.get_client(mhandle) as nfs:
 						async for epath, etype, entry, err in nfs.enumall(0, depth=self.depth):
-							await out_queue.put(ScannerData(target, NFSFileRes(entry.to_smbfile(mountpoint, epath), etype, err)))
+							if err is not None and not isinstance(err, NFSAccessError):
+								await out_queue.put(ScannerError(target, err))
+							elif entry is not None:
+								await out_queue.put(ScannerData(target, NFSFileRes(entry.to_smbfile(target, mountpoint, epath), etype, err)))
 
 		except Exception as e:
 			await out_queue.put(ScannerError(target, e))

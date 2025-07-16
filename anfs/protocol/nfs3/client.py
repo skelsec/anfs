@@ -3,6 +3,7 @@
 
 import logging
 from functools import wraps
+from pathlib import Path
 from anfs.protocol.rpc import RPC
 
 from anfs.protocol.nfs3.pack import nfs_pro_v3Packer, nfs_pro_v3Unpacker, nextiter, NFSFileEntry
@@ -19,6 +20,7 @@ from anfs.protocol.nfs3.messages import (NFS3_PROCEDURE_NULL, NFS3_PROCEDURE_GET
 					NF3SOCK, time_how, DONT_CHANGE, SET_TO_CLIENT_TIME, SET_TO_SERVER_TIME)
 
 from anfs.protocol.nfs3 import logger
+from anfs.protocol.rpc.messages import AUTH_SYS
 
 class NFSAccessError(Exception):
 	pass
@@ -96,8 +98,8 @@ class NFSv3Client:
 		if self.rpc is not None:
 			return await self.rpc.disconnect()
 
-	async def nfs_request(self, procedure, args):
-		return await self.rpc.call(NFS_PROGRAM, NFS_V3, procedure, args)
+	async def nfs_request(self, procedure, args, credential = None):
+		return await self.rpc.call(NFS_PROGRAM, NFS_V3, procedure, args, credential)
 		
 
 	async def null(self):
@@ -242,14 +244,14 @@ class NFSv3Client:
 		except Exception as e:
 			return False, e
 
-	async def read(self, file_handle, offset=0, chunk_count=1024 * 1024):
+	async def read(self, file_handle, offset=0, chunk_count=1024 * 1024, auth=None):
 		try:
 			file_handle = self.__handles[file_handle]
 			packer = nfs_pro_v3Packer()
 			packer.pack_read3args(read3args(file=nfs_fh3(file_handle), offset=offset, count=chunk_count))
 
 			logger.debug("NFSv3 procedure %d: READ on %s" % (NFS3_PROCEDURE_READ, self.host))
-			data, err = await self.nfs_request(NFS3_PROCEDURE_READ, packer.get_buffer())
+			data, err = await self.nfs_request(NFS3_PROCEDURE_READ, packer.get_buffer(), auth)
 			if err is not None:
 				raise err
 			
@@ -509,7 +511,7 @@ class NFSv3Client:
 	
 	# This version was provided by PTG
 	# The original version was not working properly
-	async def readdirplus(self, dir_handle, cookie=0, cookie_verf=b'\x00', dircount=4096, maxcount=32768):
+	async def readdirplus(self, dir_handle, cookie=0, cookie_verf=b'\x00', dircount=4096, maxcount=32768, auth=None):
 		try:
 			real_dir_handle = self.__handles[dir_handle]
 			packer = nfs_pro_v3Packer()
@@ -521,7 +523,7 @@ class NFSv3Client:
 			)
 			
 			logger.debug("NFSv3 procedure %d: READDIRPLUS on %s" % (NFS3_PROCEDURE_READDIRPLUS, self.host))
-			res, err = await self.nfs_request(NFS3_PROCEDURE_READDIRPLUS, packer.get_buffer())
+			res, err = await self.nfs_request(NFS3_PROCEDURE_READDIRPLUS, packer.get_buffer(), auth)
 			if err is not None:
 				raise err
 			unpacker = nfs_pro_v3Unpacker(res)
@@ -538,19 +540,26 @@ class NFSv3Client:
 				yield entry, None
 						   
 			if fl.resok.reply.eof is False:
-				async for entry, err in self.readdirplus(dir_handle, last_cookie, last_cookie_verf, dircount, maxcount):
+				async for entry, err in self.readdirplus(dir_handle, last_cookie, last_cookie_verf, dircount, maxcount, auth):
 					yield entry, err
 
 		except Exception as e:
 			yield False, e
 
-	async def enumall(self, dir_handle = 0, depth = 3, filter_cb = None):
+	async def enumall(self, dir_handle = 0, depth = 3, filter_cb = None, auth = None):
 		try:
 			curpath = self.handle_to_path(dir_handle)
 			if depth == 0:
 				return
 			
-			async for entry, err in self.readdirplus(dir_handle):
+			if auth == None:
+				attrs, err = await self.getattr(dir_handle)
+				if err == None:
+					auth = AUTH_SYS(uid = attrs.uid, gid = attrs.gid)
+				else:
+					auth = AUTH_SYS(uid = 0, gid = 0)
+			
+			async for entry, err in self.readdirplus(dir_handle, auth = auth):
 				if err is not None:
 					raise err
 				#print(str(entry))
@@ -569,11 +578,9 @@ class NFSv3Client:
 						tograb = await filter_cb(entrypath, entry)
 						if tograb is False:
 							continue
-
-					async for epath, etype, ee, err in self.enumall(dir_handle = entry.handle, depth=depth - 1, filter_cb=filter_cb):
+					
+					async for epath, etype, ee, err in self.enumall(dir_handle = entry.handle, depth=depth - 1, filter_cb=filter_cb, auth=AUTH_SYS(uid=entry.uid, gid=entry.gid)):
 						yield epath, etype, ee, err
-						if err is not None:
-							break
 				else:
 					# currently not supported types
 					#Type 1: Regular File
@@ -589,6 +596,33 @@ class NFSv3Client:
 			yield None, None, None, e
 				
 				
+	async def download_file(self, file_handle, local_path, chunk_size = 4096, max_size = None, uid = 0, gid = 0):
+		try:
+			done = False
+			bytes_read = 0
+
+			local_path = Path(local_path)
+			if local_path.is_dir():
+				local_path = local_path.joinpath(self.__handle_name_map[self.__handles[file_handle]])
+			
+			with open(local_path, 'wb') as f:
+				while not done:
+					data, err = await self.read(file_handle, bytes_read, chunk_size, auth = AUTH_SYS(uid = uid, gid = gid))
+
+					if err is not None:
+						raise err
+					
+					f.write(data)
+
+					bytes_read += len(data)
+					
+					if len(data) <= chunk_size or (max_size is not None and bytes_read >= max_size):
+						done = True
+			
+			return local_path, None
+
+		except Exception as e:
+			return False, e
 
 
 	#async def readdirplus(self, dir_handle, cookie=0, cookie_verf='0', dircount=4096, maxcount=32768):

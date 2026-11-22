@@ -387,12 +387,12 @@ class Compound:
 			}
 		return res
 
-	def create_session(self, clientid, sequenceid, maxrequestsize = 1049620, maxresponsesize = 1049480, maxoperations = 16, maxrequests = 8):
+	def create_session(self, clientid, sequenceid, maxrequestsize = 1049620, maxresponsesize = 1049480, maxoperations = 16, maxrequests = 8, maxresponsesize_cached = 4096):
 		p = self.__add(OP.CREATE_SESSION, self.__create_session_res)
 		p.pack_uhyper(clientid)
 		p.pack_uint(sequenceid)
 		p.pack_uint(0) # flags: no persistence, no backchannel
-		pack_channel_attrs4(p, maxrequestsize, maxresponsesize, 4096, maxoperations, maxrequests)
+		pack_channel_attrs4(p, maxrequestsize, maxresponsesize, maxresponsesize_cached, maxoperations, maxrequests)
 		pack_channel_attrs4(p, 4096, 4096, 0, 2, 1)
 		p.pack_uint(NFS4_CALLBACK_PROGRAM)
 		p.pack_uint(1) # sec_parms<>

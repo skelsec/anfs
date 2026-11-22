@@ -772,10 +772,11 @@ class NFS3Analyzer:
 	# ----------------------------------------------------------------- #
 	# NFSv4
 	# ----------------------------------------------------------------- #
-	async def check_nfs4(self, walk=True):
+	async def check_nfs4(self, walk=True, preflight=True):
 		"""
-		The NFSv4 checks, see anfs.utils.analyzer4. Without 'walk' only the versions and the
-		identity of the server are collected (two round trips).
+		The NFSv4 checks, see anfs.utils.analyzer4. Without 'walk' the namespace is left alone,
+		and without 'preflight' the CVE-2026-99362 check as well: what remains is the versions
+		and the identity of the server (two round trips).
 		"""
 		nfs4 = NFS4Analyzer(self, max_depth=self.v4_depth)
 		self._out("")
@@ -787,6 +788,8 @@ class NFS3Analyzer:
 			return
 		try:
 			nfs4.check_server()
+			if preflight is True:
+				await nfs4.check_sequence_preflight()
 			if walk is False:
 				return
 			await nfs4.walk()

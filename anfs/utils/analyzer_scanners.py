@@ -307,15 +307,17 @@ class NFSAccessRes:
 
 
 class NFS4ServerRes:
-	def __init__(self, target, minor_versions, server, os_guess, err=None):
+	def __init__(self, target, minor_versions, server, os_guess, cve_2026_99362=None, err=None):
 		self.target = target
 		self.minor_versions = minor_versions or []
 		self.server = server
 		self.os_guess = os_guess
+		# status and reason of the check, see NFS4Analyzer.check_sequence_preflight
+		self.cve_2026_99362 = cve_2026_99362 or {"status": JSONStatus.UNKNOWN, "reason": ""}
 		self.err = err
 
 	def get_header(self):
-		return ['otype', 'target', 'versions', 'os_guess', 'major_id', 'scope', 'impl_domain', 'impl_name']
+		return ['otype', 'target', 'versions', 'os_guess', 'major_id', 'scope', 'impl_domain', 'impl_name', 'cve_2026_99362', 'cve_2026_99362_reason']
 
 	def to_line(self, separator='\t'):
 		if self.err is not None:
@@ -329,6 +331,8 @@ class NFS4ServerRes:
 			str(self.server["scope"] or ''),
 			str(self.server["impl_domain"] or ''),
 			str(self.server["impl_name"] or ''),
+			str(self.cve_2026_99362["status"]),
+			str(self.cve_2026_99362["reason"]),
 		])
 
 	def to_dict(self):
@@ -340,6 +344,7 @@ class NFS4ServerRes:
 			'minor_versions': self.minor_versions,
 			'os_guess': self.os_guess,
 			'server': self.server,
+			'cve_2026_99362': self.cve_2026_99362,
 		}
 
 
@@ -432,7 +437,7 @@ class NFS3OSScanner:
 			if analyzer.mount_results:
 				analyzer.check_windows_signing()
 			# the NFSv4 server tells what it is
-			await analyzer.check_nfs4(walk=False)
+			await analyzer.check_nfs4(walk=False, preflight=False)
 			analyzer.guess_os()
 			services = list(analyzer.report["portmap"]["services"].keys())
 			res = NFS3OSRes(
@@ -481,15 +486,17 @@ class NFS3AccessScanner:
 
 class NFS4Scanner:
 	"""
-	NFSv4: supported minor versions, what the server says about itself and the exports
-	below the NFSv4 root with the access checks. Needs only the NFS port. Nothing is written.
-	With compare_v3 the exports are checked over NFSv3 as well, to find the ones
-	that have different rules in the two versions.
+	NFSv4: supported minor versions, what the server says about itself, CVE-2026-99362 and
+	the exports below the NFSv4 root with the access checks. Needs only the NFS port. Nothing
+	is written. With compare_v3 the exports are checked over NFSv3 as well, to find the ones
+	that have different rules in the two versions. Without walk the exports are left out,
+	for a quick sweep of many hosts.
 	"""
-	def __init__(self, factory: NFS3ConnectionFactory, depth=3, compare_v3=False):
+	def __init__(self, factory: NFS3ConnectionFactory, depth=3, compare_v3=False, walk=True):
 		self.factory = factory
 		self.depth = depth
-		self.compare_v3 = compare_v3
+		self.compare_v3 = compare_v3 and walk
+		self.walk = walk
 
 	async def run(self, targetid, target, out_queue):
 		try:
@@ -504,14 +511,15 @@ class NFS4Scanner:
 							await analyzer.check_access(nfs)
 						finally:
 							await nfs.disconnect()
-			await analyzer.check_nfs4()
+			await analyzer.check_nfs4(walk=self.walk)
 			nfs4 = analyzer.report["nfs4"]
 			if nfs4["status"] != JSONStatus.OK:
 				await out_queue.put(ScannerError(target, Exception(nfs4["reason"] or 'NFSv4 not available')))
 				return
 			analyzer.guess_os()
 			await out_queue.put(ScannerData(target, NFS4ServerRes(
-				target, nfs4["minor_versions"], nfs4["server"], analyzer.report["os"]["final_guess"])))
+				target, nfs4["minor_versions"], nfs4["server"], analyzer.report["os"]["final_guess"],
+				cve_2026_99362=nfs4["cve_2026_99362"])))
 			version = '4.%s' % nfs4["used_minor_version"]
 			for path, entry in nfs4["exports"].items():
 				res = NFSAccessRes(target, 'nfs4export', path, entry["checks"],
@@ -667,9 +675,9 @@ async def access_scan(url, targets, worker_count=100, show_progress=True, out_fi
 
 
 async def nfs4_scan(url, targets, worker_count=100, show_progress=True, out_file=None, include_errors=False,
-					depth=3, compare_v3=False):
+					depth=3, compare_v3=False, walk=True):
 	factory = NFS3ConnectionFactory.from_url(url)
-	await _run_scanner('NFS4Scanner', NFS4Scanner(factory, depth=depth, compare_v3=compare_v3),
+	await _run_scanner('NFS4Scanner', NFS4Scanner(factory, depth=depth, compare_v3=compare_v3, walk=walk),
 						targets, worker_count, show_progress, out_file, include_errors)
 
 
@@ -717,11 +725,13 @@ def main():
 	p_acc = sub.add_parser('access', help='Root squash, uid spoofing, write access per NFSv3 export (writes nothing)')
 	add_common(p_acc)
 
-	p_v4 = sub.add_parser('nfs4', help='NFSv4 versions, server identity, exports and their access rules (writes nothing)')
+	p_v4 = sub.add_parser('nfs4', help='NFSv4 versions, server identity, CVE-2026-99362, exports and their access rules (writes nothing)')
 	add_common(p_v4)
 	p_v4.add_argument('--depth', type=int, default=3, help='How deep the NFSv4 namespace is walked')
 	p_v4.add_argument('--compare-v3', action='store_true',
 						help='Check the exports over NFSv3 too, report the ones with different rules')
+	p_v4.add_argument('--no-walk', action='store_false', dest='walk',
+						help='Skip the exports: only the versions, the server identity and CVE-2026-99362')
 
 	args = parser.parse_args()
 
@@ -746,7 +756,7 @@ def main():
 	elif args.scanner == 'nfs4':
 		coro = nfs4_scan(args.url, args.targets, worker_count=args.worker_count,
 						show_progress=args.progress, out_file=args.out_file, include_errors=args.errors,
-						depth=args.depth, compare_v3=args.compare_v3)
+						depth=args.depth, compare_v3=args.compare_v3, walk=args.walk)
 	else:
 		parser.error('unknown scanner')
 

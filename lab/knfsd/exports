@@ -1,0 +1,10 @@
+# v4 pseudo root
+/srv/exports          *(ro,fsid=0,insecure,no_subtree_check,crossmnt)
+# read-write, root is root, any source port
+/srv/exports/rw       *(rw,insecure,no_root_squash,no_subtree_check)
+# read-only
+/srv/exports/ro       *(ro,insecure,root_squash,no_subtree_check)
+# read-write with every uid squashed to nobody
+/srv/exports/squash   *(rw,insecure,all_squash,no_subtree_check)
+# requires a source port below 1024
+/srv/exports/secure   *(rw,secure,root_squash,no_subtree_check)

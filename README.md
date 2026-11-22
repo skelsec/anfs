@@ -44,6 +44,7 @@ Everything is set in the query part of the URL, parameters can be combined.
 | `transport` | `tcp` or `udp` | `tcp` |
 | `privport` | `1` to use a source port below 1024 | off |
 | `uid`, `gid` | user and group id presented to the server (AUTH_SYS) | 0 |
+| `sec` | `sys`, `none`, or `krb5` / `krb5i` / `krb5p` with a kerberos URL, see below | `sys` |
 | `gids` | comma separated list of auxiliary group ids | none |
 | `machinename` | client name presented to the server | `anfs` |
 | `timeout` | timeout in seconds | 10 |
@@ -53,6 +54,26 @@ Examples:
 `anfsclient 'nfs://10.0.0.1/?uid=1000&gid=1000'` - be the user with id 1000. The server takes our word for it.  
 `anfsclient 'nfs://10.0.0.1:2049/?mountport=20048'` - the portmapper is firewalled but you know the ports.  
 `anfsclient 'nfs://10.0.0.1/?transport=udp'` - NFS over UDP.  
+
+## Kerberos
+`anfsclient 'nfs+kerberos-password://REALM\user:password@nas.corp.local/?dc=10.0.0.2'`  
+RPCSEC_GSS with kerberos, for exports that have `sec=krb5`, `krb5i` or `krb5p`. It works with NFSv3 and NFSv4, over TCP and UDP.
+The kerberos part comes from [asyauth](https://github.com/skelsec/asyauth), the credential is given the same way as in the other
+tools built on it: besides `kerberos-password` there is `kerberos-aes`, `kerberos-rc4`, `kerberos-ccache`, `kerberos-keytab` and so on,
+`dc` is the address of the KDC.
+
+| Parameter | Meaning | Default |
+|---|---|---|
+| `sec` | `krb5` authentication only, `krb5i` requests and replies are signed, `krb5p` they are encrypted | `krb5` |
+| `spn` | service principal of the server | `nfs/<host of the URL>` |
+| `dc` | address of the KDC | |
+
+The server is `nfs/<its hostname>` in kerberos. If you connect to an IP address, set `spn`:  
+`anfsclient 'nfs+kerberos-password://REALM\user:password@10.0.0.1/?dc=10.0.0.2&spn=nfs/nas.corp.local&sec=krb5p&version=4'`
+
+With kerberos the server knows who you are, `uid` and `gid` have no meaning. A user the server has no account for is usually treated as nobody.  
+Portmapper and the mount service are still used without authentication when NFSv3 is selected.  
+`sec=none` in a plain `nfs://` URL sends no credentials at all (AUTH_NONE).
 
 # anfsanalyze
 Checks an NFS server for the usual security problems and prints a report (`--json-file` saves it as JSON).  

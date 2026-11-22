@@ -303,6 +303,8 @@ class NFSv4Client:
 				if len(results) > 0 and results[0][1] == 0:
 					# the server has executed the SEQUENCE, the slot moves on
 					slot[1] += 1
+				elif status == nfsstat4.NFS4ERR_RETRY_UNCACHED_REP:
+					slot[1] += 1
 			finally:
 				slots.put_nowait(slot)
 
@@ -310,6 +312,10 @@ class NFSv4Client:
 				return [r[2] for r in results[1:]]
 
 			failed = results[-1] if len(results) > 0 else (OP.SEQUENCE, status, None)
+			if status == nfsstat4.NFS4ERR_RETRY_UNCACHED_REP:
+				# The reply of the previous call on this slot did not arrive (or was not valid),
+				# the server takes this call for a repeat of that one. The slot is past that now.
+				continue
 			if status in NFS4_SESSION_LOST and failed[0] == OP.SEQUENCE and _recover is True:
 				logger.debug('NFSv4 session lost (%s), creating a new one' % nfsstat4(status).name)
 				await self.__establish_session(generation)

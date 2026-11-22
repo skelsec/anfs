@@ -39,8 +39,9 @@ setup(
 	python_requires='>=3.7',
 	install_requires=[
 		'unicrypto>=0.0.12',
-		'asyauth>=0.0.23',
-		'asysocks>=0.2.12',
+		'asyauth>=0.0.25',
+		'asysocks>=0.2.19',
+		'minikerberos>=0.4.12',
 		'prompt-toolkit>=3.0.2',
 		'tqdm',
 		'colorama',

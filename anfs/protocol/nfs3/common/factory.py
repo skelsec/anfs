@@ -13,6 +13,7 @@ from anfs.protocol.portmap import Portmap
 from anfs.protocol.mount import Mount
 from anfs.protocol.rpc.common.target import RPCTarget
 from anfs.protocol.rpc.messages import AUTH_SYS, AUTH_NULL
+from anfs.protocol.rpc.gss import RPCSEC_GSS, SEC_NAMES
 from anfs.protocol.nfs3.client import NFSv3Client
 from anfs.protocol.nfs4.client import NFSv4Client
 from asyauth.common.credentials import UniCredential
@@ -27,8 +28,7 @@ class NFS3ConnectionFactory:
 	@staticmethod
 	def from_url(connection_url):
 		target = RPCTarget.from_url(connection_url)
-		credential = NFS3ConnectionFactory.authsys_from_url(connection_url)
-		#credential = UniCredential.from_url(connection_url)
+		credential = NFS3ConnectionFactory.credential_from_url(connection_url)
 		query = parse_qs(urlparse(connection_url).query)
 		version = query['version'][0] if 'version' in query else '3'
 		return NFS3ConnectionFactory(credential, target, version)
@@ -49,6 +49,34 @@ class NFS3ConnectionFactory:
 
 	def is_v4(self):
 		return self.version[0] == 4
+
+	@staticmethod
+	def credential_from_url(connection_url):
+		"""
+		The credential the URL describes:
+		nfs://                    AUTH_SYS with the uid, gid, gids of the URL (AUTH_NONE with sec=none)
+		nfs+kerberos-<secret>://  RPCSEC_GSS with kerberos, the same URL format as in other
+		                          asyauth based tools. sec is krb5 (default), krb5i or krb5p
+		"""
+		url_e = urlparse(connection_url)
+		query = parse_qs(url_e.query)
+		sec = query['sec'][0].lower() if 'sec' in query else None
+		if url_e.scheme.find('+') == -1:
+			if sec == 'none':
+				return AUTH_NULL()
+			if sec not in (None, 'sys'):
+				raise Exception('sec=%s needs credentials, eg. nfs+kerberos-password://REALM\\user:password@server/?dc=<ip of the KDC>' % sec)
+			return NFS3ConnectionFactory.authsys_from_url(connection_url)
+
+		credential = UniCredential.from_url(connection_url)
+		if hasattr(credential, 'build_gss_context') is False:
+			raise Exception('Authentication type "%s" can not be used with NFS, only kerberos' % url_e.scheme.split('+', 1)[1])
+		if sec is None:
+			sec = 'krb5'
+		if sec not in SEC_NAMES:
+			raise Exception('Unknown sec "%s", must be one of %s' % (sec, ', '.join(SEC_NAMES)))
+		spn = query['spn'][0] if 'spn' in query else None
+		return RPCSEC_GSS(credential, SEC_NAMES[sec], spn)
 
 	@staticmethod
 	def authsys_from_url(connection_url):
@@ -73,7 +101,11 @@ class NFS3ConnectionFactory:
 				'\tuid - int - user id to present to the server (default: 0)\n' + \
 				'\tgid - int - group id to present to the server (default: 0)\n' + \
 				'\tgids - str - comma separated list of auxiliary group ids\n' + \
-				'\tmachinename - str - client machine name to present to the server (default: anfs)\n'
+				'\tmachinename - str - client machine name to present to the server (default: anfs)\n' + \
+				'Kerberos (RPCSEC_GSS): nfs+kerberos-password://REALM\\user:password@server/?dc=<ip of the KDC>\n' + \
+				'\tother secret types of asyauth work as well: kerberos-aes, kerberos-rc4, kerberos-ccache, kerberos-keytab...\n' + \
+				'\tsec - str - krb5 (authentication only, default), krb5i (signed), krb5p (encrypted)\n' + \
+				'\tspn - str - service principal of the server (default: nfs/<host of the URL>)\n'
 		return ''
 
 	def get_credential(self) -> UniCredential:

@@ -17,7 +17,7 @@ async def get_report(server):
 	return _reports[server]
 
 def is_knfsd(report):
-	return report['nfs4']['server']['major_id'] == 'knfsd'
+	return report['nfs4']['server']['major_id'].startswith('knfsd')
 
 async def test_os_guess(server):
 	report = await get_report(server)
@@ -60,7 +60,7 @@ async def test_nfs4_server(server):
 		assert nfs4['server']['impl_domain'] == 'kernel.org'
 		assert nfs4['server']['impl_name'].startswith('Linux ')
 	else:
-		assert nfs4['server']['major_id'] == 'ganesha'
+		assert nfs4['server']['major_id'].startswith('ganesha')
 
 async def test_nfs4_exports(server):
 	report = await get_report(server)

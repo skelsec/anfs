@@ -6,6 +6,7 @@ Two NFS servers in docker, with identical content, for testing anfs without a NA
 |---|---|---|---|
 | `knfsd` | 172.30.111.10 | Linux kernel NFS server | v3, v4.0, v4.1, v4.2 (TCP and UDP for v3) |
 | `ganesha` | 172.30.111.11 | NFS-Ganesha (userspace) | v3, v4.0, v4.1, v4.2 |
+| `kdc` | 172.30.111.5 | MIT Kerberos KDC, realm `ANFS.LAB` | |
 
 Nothing is published on the host, talk to the container IPs directly.
 On both servers portmapper is on 111, mountd on 20048 and NFS on 2049.
@@ -68,7 +69,35 @@ sets up a new session on its own).
 | `/srv/exports/ro` | read-only, `root_squash` |
 | `/srv/exports/squash` | read-write, `all_squash` |
 | `/srv/exports/secure` | read-write, `root_squash`, client must use a source port below 1024 |
+| `/srv/exports/krb5` | read-write, `root_squash`, kerberos only (`krb5`, `krb5i`, `krb5p`) |
 | `/srv/exports/nomount` | knfsd only: read-write, `no_root_squash` over NFSv3, but not a mount point, so over NFSv4 it has the options of the root export (`ro`, `root_squash`) |
+
+## Kerberos
+
+The KDC has two users, both with the password `Passw0rd!`:
+
+| Principal | On the servers |
+|---|---|
+| `alice@ANFS.LAB` | has an account, uid 1000 |
+| `mallory@ANFS.LAB` | no account, the servers treat her as nobody |
+
+The servers are `nfs/knfsd.anfs.lab` and `nfs/ganesha.anfs.lab`. Nothing resolves these names
+on the host, give the principal in the URL:
+
+    anfsclient 'nfs+kerberos-password://ANFS.LAB\alice:Passw0rd!@172.30.111.10/?dc=172.30.111.5&spn=nfs/knfsd.anfs.lab&sec=krb5p&version=4'
+
+The keys of the services are derived from fixed passwords by `krb5.sh` in the server containers
+and by the entrypoint of the KDC, so there is no keytab to hand around. The kernel server needs
+the `rpcsec_gss_krb5` module, its entrypoint loads it.
+
+Only `/srv/exports/krb5` (and the NFSv4 root of the kernel server) accepts kerberos, the other
+exports are AUTH_SYS only. `/srv/exports/krb5/scratch` is the place for write tests.
+
+Two things the tests step around:
+- The NFSv4 server of Linux 7.0 sends wrong signatures with `krb5i` when it answers several
+  READs of a page or more at the same time: replies leave with the signature of another reply.
+  `test_nfs4_parallel_big` is an expected failure there.
+- Ganesha can not sign or encrypt replies over UDP, only `krb5` works there.
 
 `/srv/outside/secret.txt` and `/srv/etc/shadow` (fake) are on the same
 filesystem but outside of every export, they are the targets of the export

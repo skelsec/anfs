@@ -289,6 +289,15 @@ class NFSv3Client(NFSv3RawMixin):
 		if self.rpc is not None:
 			return await self.rpc.disconnect()
 
+	def owner_auth(self, uid, gid):
+		"""
+		Credential to act as the owner of a file. With AUTH_SYS the server takes our word
+		for who we are, with anything else (eg. kerberos) we stay who we authenticated as.
+		"""
+		if self.credential is None or isinstance(self.credential, AUTH_SYS):
+			return AUTH_SYS(uid = uid, gid = gid)
+		return None
+
 	async def nfs_request(self, procedure, args, credential = None):
 		return await self.rpc.call(NFS_PROGRAM, NFS_V3, procedure, args, credential)
 		
@@ -386,7 +395,7 @@ class NFSv3Client(NFSv3RawMixin):
 			response = unpacker.unpack_lookup3res(data_format='json')
 			
 			if response['status'] != 0:
-				return False, None
+				raise NFSAccessError(response['status'])
 			
 			resok = response['resok']
 			oa = resok.get('obj_attributes')
@@ -791,9 +800,9 @@ class NFSv3Client(NFSv3RawMixin):
 			if auth is None:
 				attrs, err = await self.getattr(dir_handle)
 				if err is None:
-					auth = AUTH_SYS(uid = attrs.uid, gid = attrs.gid)
+					auth = self.owner_auth(attrs.uid, attrs.gid)
 				else:
-					auth = AUTH_SYS(uid = 0, gid = 0)
+					auth = self.owner_auth(0, 0)
 			
 			async for entry, err in self.readdirplus(dir_handle, auth = auth):
 				if err is not None:
@@ -815,7 +824,7 @@ class NFSv3Client(NFSv3RawMixin):
 						if tograb is False:
 							continue
 					
-					async for epath, etype, ee, err in self.enumall(dir_handle = entry.handle, depth=depth - 1, filter_cb=filter_cb, auth=AUTH_SYS(uid=entry.uid, gid=entry.gid)):
+					async for epath, etype, ee, err in self.enumall(dir_handle = entry.handle, depth=depth - 1, filter_cb=filter_cb, auth=self.owner_auth(entry.uid, entry.gid)):
 						yield epath, etype, ee, err
 				else:
 					# currently not supported types
@@ -843,7 +852,7 @@ class NFSv3Client(NFSv3RawMixin):
 			
 			with open(local_path, 'wb') as f:
 				while not done:
-					data, err = await self.read(file_handle, bytes_read, chunk_size, auth = AUTH_SYS(uid = uid, gid = gid))
+					data, err = await self.read(file_handle, bytes_read, chunk_size, auth = self.owner_auth(uid, gid))
 
 					if err is not None:
 						raise err

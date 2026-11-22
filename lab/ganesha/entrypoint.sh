@@ -3,6 +3,7 @@ set -e
 
 /storage.sh
 /fixtures.sh /srv
+/krb5.sh ganesha
 
 mkdir -p /run/rpcbind /run/dbus /var/run/ganesha /var/lib/nfs/ganesha
 rm -f /run/dbus/pid

@@ -9,6 +9,7 @@ from anfs.protocol.rpc.packetizer import RPCPacketizer
 from anfs.protocol.rpc.common.exceptions import *
 from anfs.protocol.rpc.messages import rpc_msg, msg_type, call_body, reply_body,\
 	AUTH_NULL, reply_stat, accepted_reply, accept_stat
+from anfs.protocol.rpc.gss import RPCSEC_GSS
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,8 @@ class RPC:
 		self.__current_xid = 10
 		self.__is_udp = False
 		self.__xid_table = {}
+		# RPCSEC_GSS credentials that created a context over this connection
+		self.__gss_used = {}
 		if self.credential is None:
 			self.credential = AUTH_NULL()
 
@@ -105,6 +108,11 @@ class RPC:
 			return False, e
 
 	async def disconnect(self):
+		if self.connection is not None and self.__read_task is not None and len(self.__gss_used) > 0:
+			gss_used = list(self.__gss_used.values())
+			self.__gss_used = {}
+			for credential, program, version in gss_used:
+				await credential.destroy(self, program, version)
 		if self.__read_task is not None:
 			self.__read_task.cancel()
 			self.__read_task = None
@@ -134,9 +142,18 @@ class RPC:
 			fragment = rpc_fragment_header.to_bytes(4, byteorder='big', signed=False) + fragment
 			await self.connection.write(fragment)
 	
-	async def call(self, program, version, procedure, data, credential = None):
+	async def call_raw(self, program, version, procedure, data, cred, verf = None):
+		"""
+		One call and its reply. Returns the accepted_reply, raises when there is none.
+		cred is the credential to send, or a coroutine function that gives the
+		(credential, verifier, arguments) for the xid of the call (RPCSEC_GSS signs the header).
+		"""
 		xid, xid_queue = await self.register_xid(self.next_xid())
 		try:
+			if verf is None:
+				verf = AUTH_NULL() # for both auth null and auth sys, the verifier is null
+			if callable(cred):
+				cred, verf, data = await cred(xid)
 			call = rpc_msg()
 			call.xid = xid
 			call.msg_type = msg_type.CALL
@@ -145,8 +162,8 @@ class RPC:
 			call.body.prog = program
 			call.body.vers = version
 			call.body.proc = procedure
-			call.body.cred = self.credential if credential is None else credential
-			call.body.verf = AUTH_NULL() # for both auth null and auth sys, the verifier is null
+			call.body.cred = cred
+			call.body.verf = verf
 			call.body.data = data
 			
 			await self.__send(call.to_bytes())
@@ -170,7 +187,18 @@ class RPC:
 
 			if areply.stat != accept_stat.SUCCESS:
 				raise RPCCallRejectedException(areply.stat.value, areply.mismatch_info)
-			
+			return areply
+		finally:
+			del self.__xid_table[xid]
+
+	async def call(self, program, version, procedure, data, credential = None):
+		try:
+			if credential is None:
+				credential = self.credential
+			if isinstance(credential, RPCSEC_GSS):
+				self.__gss_used[id(credential)] = (credential, program, version)
+				return await credential.call(self, program, version, procedure, data), None
+			areply = await self.call_raw(program, version, procedure, data, credential)
 			return areply.results, None
 		except RPCException as e:
 			# Expected, handled error conditions: return them quietly so a lost
@@ -179,5 +207,3 @@ class RPC:
 		except Exception as e:
 			logger.debug('RPC call failed', exc_info = True)
 			return None, e
-		finally:
-			del self.__xid_table[xid]

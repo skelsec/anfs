@@ -1,0 +1,56 @@
+# anfs test lab. See README.md.
+#
+# Servers are reached on their fixed container IPs, nothing is published on
+# the host:
+#   knfsd    172.30.111.10   Linux kernel NFS server (v3, v4.0, v4.1, v4.2)
+#   ganesha  172.30.111.11   NFS-Ganesha userspace server (v3, v4.0, v4.1)
+#   kdc      172.30.111.5    MIT Kerberos KDC of the ANFS.LAB realm
+name: anfslab
+
+services:
+  kdc:
+    build:
+      context: .
+      dockerfile: kdc/Dockerfile
+    hostname: kdc.anfs.lab
+    networks:
+      lab:
+        ipv4_address: 172.30.111.5
+
+  knfsd:
+    build:
+      context: .
+      dockerfile: knfsd/Dockerfile
+    hostname: knfsd.anfs.lab
+    # the kernel server needs to mount the nfsd filesystem and manage exports
+    privileged: true
+    volumes:
+      # holds the image of the exported filesystem, see storage.sh
+      - knfsd-data:/data
+      - /lib/modules:/lib/modules:ro
+    networks:
+      lab:
+        ipv4_address: 172.30.111.10
+
+  ganesha:
+    build:
+      context: .
+      dockerfile: ganesha/Dockerfile
+    hostname: ganesha.anfs.lab
+    # needed to loop mount the exported filesystem, see storage.sh
+    privileged: true
+    volumes:
+      - ganesha-data:/data
+    networks:
+      lab:
+        ipv4_address: 172.30.111.11
+
+volumes:
+  knfsd-data:
+  ganesha-data:
+
+networks:
+  lab:
+    ipam:
+      config:
+        - subnet: 172.30.111.0/24

@@ -1,0 +1,19 @@
+# NFSv4 root, the exports below are reached as /rw, /ro, ... under NFSv4.
+# Every export is a mount point of its own (bind mounted by the entrypoint):
+# nfsd switches from one export to another only when it crosses a mount point,
+# without that the options of this export would apply to all of them.
+/srv/exports          *(ro,fsid=0,insecure,no_subtree_check,crossmnt,sec=sys:krb5:krb5i:krb5p)
+# read-write, root is root, any source port
+/srv/exports/rw       *(rw,insecure,no_root_squash,no_subtree_check)
+# read-only
+/srv/exports/ro       *(ro,insecure,root_squash,no_subtree_check)
+# read-write with every uid squashed to nobody
+/srv/exports/squash   *(rw,insecure,all_squash,no_subtree_check)
+# requires a source port below 1024
+/srv/exports/secure   *(rw,secure,root_squash,no_subtree_check)
+# kerberos only
+/srv/exports/krb5     *(rw,insecure,root_squash,no_subtree_check,sec=krb5:krb5i:krb5p)
+# NOT a mount point: over NFSv3 these options apply, over NFSv4 it is reached
+# through the root export and gets the options of that one (ro, root_squash).
+# anfsanalyze reports exports like this.
+/srv/exports/nomount  *(rw,insecure,no_root_squash,no_subtree_check)

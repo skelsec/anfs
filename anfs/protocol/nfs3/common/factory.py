@@ -6,26 +6,107 @@
 #
 import enum
 import copy
+from urllib.parse import urlparse, parse_qs
 
 from anfs.protocol.rpc import RPC
 from anfs.protocol.portmap import Portmap
 from anfs.protocol.mount import Mount
 from anfs.protocol.rpc.common.target import RPCTarget
-from anfs.protocol.rpc.messages import AUTH_SYS
+from anfs.protocol.rpc.messages import AUTH_SYS, AUTH_NULL
+from anfs.protocol.rpc.gss import RPCSEC_GSS, SEC_NAMES
 from anfs.protocol.nfs3.client import NFSv3Client
+from anfs.protocol.nfs4.client import NFSv4Client
 from asyauth.common.credentials import UniCredential
 
 class NFS3ConnectionFactory:	
-	def __init__(self, credential:UniCredential = None, target:RPCTarget = None ):
+	def __init__(self, credential:UniCredential = None, target:RPCTarget = None, version = '3'):
 		self.credential = credential
 		self.target = target
+		# NFS protocol version asked for in the URL: 3, 4.0, 4.1 or 4.2
+		self.version = NFS3ConnectionFactory.parse_version(version)
 
 	@staticmethod
 	def from_url(connection_url):
 		target = RPCTarget.from_url(connection_url)
-		credential = AUTH_SYS()
-		#credential = UniCredential.from_url(connection_url)
-		return NFS3ConnectionFactory(credential, target)
+		credential = NFS3ConnectionFactory.credential_from_url(connection_url)
+		query = parse_qs(urlparse(connection_url).query)
+		version = query['version'][0] if 'version' in query else '3'
+		return NFS3ConnectionFactory(credential, target, version)
+
+	@staticmethod
+	def parse_version(version):
+		"""Returns the (major, minor) version tuple for the version string"""
+		version = str(version).lower().lstrip('v')
+		if version == '3':
+			return (3, 0)
+		if version in ('4', '4.1'):
+			return (4, 1)
+		if version == '4.2':
+			return (4, 2)
+		if version == '4.0':
+			return (4, 0)
+		raise Exception('Unknown NFS version "%s", must be one of 3, 4, 4.0, 4.1, 4.2' % version)
+
+	def is_v4(self):
+		return self.version[0] == 4
+
+	@staticmethod
+	def credential_from_url(connection_url):
+		"""
+		The credential the URL describes:
+		nfs://                    AUTH_SYS with the uid, gid, gids of the URL (AUTH_NONE with sec=none)
+		nfs+kerberos-<secret>://  RPCSEC_GSS with kerberos, the same URL format as in other
+		                          asyauth based tools. sec is krb5 (default), krb5i or krb5p
+		"""
+		url_e = urlparse(connection_url)
+		query = parse_qs(url_e.query)
+		sec = query['sec'][0].lower() if 'sec' in query else None
+		if url_e.scheme.find('+') == -1:
+			if sec == 'none':
+				return AUTH_NULL()
+			if sec not in (None, 'sys'):
+				raise Exception('sec=%s needs credentials, eg. nfs+kerberos-password://REALM\\user:password@server/?dc=<ip of the KDC>' % sec)
+			return NFS3ConnectionFactory.authsys_from_url(connection_url)
+
+		credential = UniCredential.from_url(connection_url)
+		if hasattr(credential, 'build_gss_context') is False:
+			raise Exception('Authentication type "%s" can not be used with NFS, only kerberos' % url_e.scheme.split('+', 1)[1])
+		if sec is None:
+			sec = 'krb5'
+		if sec not in SEC_NAMES:
+			raise Exception('Unknown sec "%s", must be one of %s' % (sec, ', '.join(SEC_NAMES)))
+		spn = query['spn'][0] if 'spn' in query else None
+		return RPCSEC_GSS(credential, SEC_NAMES[sec], spn)
+
+	@staticmethod
+	def authsys_from_url(connection_url):
+		"""
+		Creates an AUTH_SYS credential from the uid, gid, gids and machinename query parameters
+		"""
+		query = parse_qs(urlparse(connection_url).query)
+		uid = int(query['uid'][0]) if 'uid' in query else None
+		gid = int(query['gid'][0]) if 'gid' in query else None
+		gids = None
+		if 'gids' in query:
+			gids = [int(x) for x in ','.join(query['gids']).split(',') if x != '']
+		machinename = query['machinename'][0] if 'machinename' in query else None
+		return AUTH_SYS(machinename = machinename, uid = uid, gid = gid, gids = gids)
+
+	@staticmethod
+	def get_help(helptype:str = 'url'):
+		if helptype == 'url':
+			return 'Protocol version -query params-:\n' + \
+				'\tversion - str - 3 (default), 4.0, 4 or 4.1, 4.2\n' + \
+				'Authentication (AUTH_SYS) related parameters -query params-:\n' + \
+				'\tuid - int - user id to present to the server (default: 0)\n' + \
+				'\tgid - int - group id to present to the server (default: 0)\n' + \
+				'\tgids - str - comma separated list of auxiliary group ids\n' + \
+				'\tmachinename - str - client machine name to present to the server (default: anfs)\n' + \
+				'Kerberos (RPCSEC_GSS): nfs+kerberos-password://REALM\\user:password@server/?dc=<ip of the KDC>\n' + \
+				'\tother secret types of asyauth work as well: kerberos-aes, kerberos-rc4, kerberos-ccache, kerberos-keytab...\n' + \
+				'\tsec - str - krb5 (authentication only, default), krb5i (signed), krb5p (encrypted)\n' + \
+				'\tspn - str - service principal of the server (default: nfs/<host of the URL>)\n'
+		return ''
 
 	def get_credential(self) -> UniCredential:
 		"""
@@ -50,10 +131,11 @@ class NFS3ConnectionFactory:
 		Creates a portmap object
 		"""
 
-		target = self.get_target()
-		target.port = 111
-		cred = self.get_credential()
-		return Portmap(target, cred)
+		target = self.get_target().get_portmap_target()
+		# The PORTMAP protocol is queried with AUTH_NULL - it carries no
+		# meaningful AUTH_SYS authorization and many implementations silently
+		# drop AUTH_SYS requests. NFS file operations use their own credential.
+		return Portmap(target, AUTH_NULL())
 	
 	def get_mount(self):
 		"""
@@ -63,9 +145,12 @@ class NFS3ConnectionFactory:
 		:rtype: :class:`Mount`
 		"""
 		
-		target = self.get_target()
-		cred = self.get_credential()
-		return Mount(target, cred)
+		target = self.get_target().get_mount_target()
+		# mountd is queried with AUTH_NULL for the same reason as portmap above:
+		# AUTH_SYS is meant for NFS file ops, and several mountd implementations
+		# only answer AUTH_NULL (silently dropping AUTH_SYS, which manifests as a
+		# timeout). The actual NFS operations still use the factory credential.
+		return Mount(target, AUTH_NULL())
 
 	def get_client(self, root_handle) -> NFSv3Client:
 		"""
@@ -75,8 +160,24 @@ class NFS3ConnectionFactory:
 		:rtype: :class:`NFSv3Client`
 		"""
 		cred = self.get_credential()
-		target = self.get_target()
+		target = self.get_target().get_nfs_target()
 		return NFSv3Client(root_handle, target, cred)
+
+	def get_client4(self) -> NFSv4Client:
+		"""
+		Creates an NFSv4 client. There is no mount protocol in NFSv4, the
+		client starts at the root of the server's namespace.
+
+		:return: NFSv4 client
+		:rtype: :class:`NFSv4Client`
+		"""
+		cred = self.get_credential()
+		target = self.get_target().get_nfs_target()
+		if target.port == 0:
+			# NFSv4 servers are not required to register with the portmapper (or to have one)
+			target.port = 2049
+		minorversion = self.version[1] if self.is_v4() else 1
+		return NFSv4Client(target, cred, minorversion = minorversion)
 
 
 	def get_connection(self) -> RPC:
@@ -99,7 +200,9 @@ class NFS3ConnectionFactory:
 		"""
 		target = self.target.get_newtarget(ip_or_hostname, 0)
 		cred = self.get_credential()
-		return NFS3ConnectionFactory(credential = cred, target = target)
+		res = NFS3ConnectionFactory(credential = cred, target = target)
+		res.version = self.version
+		return res
 		
 	def __str__(self):
 		t = '==== NFSConnectionFactory ====\r\n'

@@ -1,7 +1,7 @@
 from anfs.protocol.rpc import RPC
 import traceback
 import io
-from anfs.protocol.mount.messages import export, fhstatus, mountpoint, pack_str
+from anfs.protocol.mount.messages import export, fhstatus, mountpoint, pack_str, mountres3
 
 # https://datatracker.ietf.org/doc/html/rfc1094#appendix-A
 
@@ -44,6 +44,22 @@ class Mount:
 			
 			res = fhstatus.from_bytes(res)
 			return res.fhandle, None
+		except Exception as e:
+			return None, e
+
+	async def mnt(self, path):
+		"""Mount a directory, returning the full mountres3 (status, fhandle, auth_flavors).
+
+		Unlike mount(), this preserves the auth_flavors advertised by the server,
+		which is required by the security analyzer.
+		"""
+		try:
+			data = pack_str(path)
+			res, err = await self.rpc.call(100005, 3, 1, data)
+			if err is not None:
+				raise err
+
+			return mountres3.from_bytes(res), None
 		except Exception as e:
 			return None, e
 

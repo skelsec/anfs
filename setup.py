@@ -33,14 +33,15 @@ setup(
 	zip_safe = False,
 	#
 	# license="LICENSE.txt",
-	description="Asynchronous NFSv3 protocol implementation",
+	description="Asynchronous NFSv3 and NFSv4 client implementation",
 
 	# long_description=open("README.txt").read(),
 	python_requires='>=3.7',
 	install_requires=[
-		'unicrypto>=0.0.10',
-		'asyauth>=0.0.20',
-		'asysocks>=0.2.12',
+		'unicrypto>=0.0.12',
+		'asyauth>=0.0.25',
+		'asysocks>=0.2.19',
+		'minikerberos>=0.4.12',
 		'prompt-toolkit>=3.0.2',
 		'tqdm',
 		'colorama',
@@ -58,6 +59,8 @@ setup(
 	entry_points={
 		'console_scripts': [
 			'anfsclient = anfs.examples.anfsclient:main',
+			'anfsanalyze = anfs.utils.analyzer:main',
+			'anfsscan = anfs.utils.analyzer_scanners:main',
 		],
 
 	}

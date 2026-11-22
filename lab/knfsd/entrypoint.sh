@@ -1,6 +1,7 @@
 #!/bin/sh
 set -e
 
+/storage.sh
 /fixtures.sh /srv
 
 modprobe nfsd 2>/dev/null || true

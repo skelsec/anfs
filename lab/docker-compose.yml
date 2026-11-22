@@ -15,8 +15,8 @@ services:
     # the kernel server needs to mount the nfsd filesystem and manage exports
     privileged: true
     volumes:
-      # exports must live on a real filesystem, overlayfs is not exportable
-      - knfsd-data:/srv
+      # holds the image of the exported filesystem, see storage.sh
+      - knfsd-data:/data
       - /lib/modules:/lib/modules:ro
     networks:
       lab:
@@ -27,14 +27,10 @@ services:
       context: .
       dockerfile: ganesha/Dockerfile
     hostname: ganesha
-    # the VFS backend opens files by handle, which needs CAP_DAC_READ_SEARCH
-    cap_add:
-      - SYS_ADMIN
-      - DAC_READ_SEARCH
-    security_opt:
-      - apparmor:unconfined
+    # needed to loop mount the exported filesystem, see storage.sh
+    privileged: true
     volumes:
-      - ganesha-data:/srv
+      - ganesha-data:/data
     networks:
       lab:
         ipv4_address: 172.30.111.11

@@ -1,6 +1,7 @@
 #!/bin/sh
 set -e
 
+/storage.sh
 /fixtures.sh /srv
 
 mkdir -p /run/rpcbind /run/dbus /var/run/ganesha /var/lib/nfs/ganesha

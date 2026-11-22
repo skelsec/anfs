@@ -4,5 +4,5 @@ RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nfs-ganesha nfs-ganesha-vfs rpcbind netbase dbus procps \
  && rm -rf /var/lib/apt/lists/*
 COPY ganesha/ganesha.conf /etc/ganesha/ganesha.conf
-COPY fixtures.sh ganesha/entrypoint.sh /
+COPY storage.sh fixtures.sh ganesha/entrypoint.sh /
 ENTRYPOINT ["/entrypoint.sh"]

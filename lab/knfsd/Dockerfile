@@ -4,5 +4,5 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY knfsd/exports /etc/exports
 COPY knfsd/nfs.conf /etc/nfs.conf
-COPY fixtures.sh knfsd/entrypoint.sh /
+COPY storage.sh fixtures.sh knfsd/entrypoint.sh /
 ENTRYPOINT ["/entrypoint.sh"]

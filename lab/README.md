@@ -10,6 +10,24 @@ Two NFS servers in docker, with identical content, for testing anfs without a NA
 Nothing is published on the host, talk to the container IPs directly.
 On both servers portmapper is on 111, mountd on 20048 and NFS on 2049.
 
+Both containers run privileged: the kernel server needs it for nfsd, and both
+need it to mount their data filesystem (see below).
+
+## Why the exports live on a loopback filesystem
+
+NFS file handles are not confined to the exported directory: a client can craft
+the handle of any file on the *filesystem* the export is on (the export escape
+check of `anfsanalyze` does exactly this). A docker volume is a plain directory
+on the host's filesystem, so exporting one hands the files of the docker host
+to anything that can reach the container.
+
+`storage.sh` therefore creates a 512M ext4 image inside the volume and mounts
+it on `/srv`, the servers refuse to start without it. An escape ends at the
+root of that image, where it finds what the lab planted for it:
+`/srv/outside/secret.txt` and a fake `/srv/etc/shadow` with dummy hashes.
+
+Do not replace this with a bind mount or a bare volume.
+
 ## Usage
 
 The kernel server needs the `nfsd` module on the host:
@@ -39,8 +57,9 @@ exposes them below its pseudo root as `/rw`, `/ro`, ... and so does Ganesha.
 | `/srv/exports/squash` | read-write, `all_squash` |
 | `/srv/exports/secure` | read-write, `root_squash`, client must use a source port below 1024 |
 
-`/srv/outside/secret.txt` is on the same filesystem but outside of every
-export, it is the target for the export escape checks.
+`/srv/outside/secret.txt` and `/srv/etc/shadow` (fake) are on the same
+filesystem but outside of every export, they are the targets of the export
+escape checks.
 
 ## Content
 

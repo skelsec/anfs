@@ -114,6 +114,8 @@ What it looks at:
   the exports found by walking the NFSv4 namespace with their auth methods and the same access checks
 - exports that have different rules over NFSv3 and NFSv4. The Linux server only switches exports at mount points
   when it is used over NFSv4, an export that is a plain subdirectory of another export gets the options of the parent there.
+- CVE-2026-99362 of the Linux NFSv4.1 server (overflow of the session reply cache, no authentication needed).
+  Told from the order the server checks a SEQUENCE in, the overflow is not triggered.
 - server OS guess
 
 The NFSv4 part only needs the NFS port, it works when the portmapper and mountd are firewalled. `--no-v3` / `--no-v4` skips one of the halves.  
@@ -129,7 +131,7 @@ The same checks for many targets, one result per line (TSV files in the current 
 | `clients` | clients that have exports mounted |
 | `os` | OS guess, portmapper services |
 | `access` | root squash, uid spoofing, write access per NFSv3 export (writes nothing) |
-| `nfs4` | NFSv4 versions, server identity, exports with the access checks (writes nothing). `--compare-v3` also reports the exports that have different rules over NFSv3 |
+| `nfs4` | NFSv4 versions, server identity, CVE-2026-99362, exports with the access checks (writes nothing). `--compare-v3` also reports the exports that have different rules over NFSv3, `--no-walk` leaves the exports out for a quick sweep |
 | `vuln` | export escape and `/etc/shadow` read, `--check-no-root-squash` writes to the server |
 
 # Using it as a library

@@ -62,6 +62,20 @@ async def test_nfs4_server(server):
 	else:
 		assert nfs4['server']['major_id'].startswith('ganesha')
 
+async def test_cve_2026_99362(server):
+	report = await get_report(server)
+	cve = report['nfs4']['cve_2026_99362']
+	if not is_knfsd(report):
+		# no session with replies that small, and not the Linux server anyway
+		assert cve['status'] == JSONStatus.UNKNOWN
+		assert cve['reason'] == 'create_session_NFS4ERR_TOOSMALL'
+		return
+	# either answer is a result, which one depends on the kernel of the docker host
+	assert (cve['status'], cve['reason']) in (
+		(JSONStatus.VULNERABLE, 'slot_consumed_on_error'),
+		(JSONStatus.OK, 'slot_kept_on_error'),
+	)
+
 async def test_nfs4_exports(server):
 	report = await get_report(server)
 	exports = report['nfs4']['exports']

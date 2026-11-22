@@ -10,13 +10,16 @@
 #   - Security flavors accepted for every export (SECINFO)
 #   - Root squash, uid spoofing and write access, tested with ACCESS only: nothing is written
 #   - The same export behaving differently over NFSv3 and NFSv4
+#   - CVE-2026-99362 of the Linux server (overflow of the session reply cache), by the
+#     order SEQUENCE is checked in. The overflow itself is not triggered.
 import binascii
+import os
 
 from anfs.protocol.rpc import RPC
 from anfs.protocol.rpc.messages import AUTH_SYS
 from anfs.protocol.nfs4.client import NFS4Error, owner_to_id
 from anfs.protocol.nfs4.constants import (
-	NFS_PROGRAM, NFS_V4, NFSPROC4_COMPOUND, NF4DIR, nfsstat4, RPCSEC_GSS,
+	NFS_PROGRAM, NFS_V4, NFSPROC4_COMPOUND, NF4DIR, nfsstat4, RPCSEC_GSS, NFS4_VERIFIER_SIZE,
 	RPC_GSS_SVC_NONE, RPC_GSS_SVC_INTEGRITY, RPC_GSS_SVC_PRIVACY,
 )
 from anfs.protocol.nfs4.xdr import Compound
@@ -47,6 +50,12 @@ IMPL_DOMAINS = {
 	'emc.com' : 'EMC',
 	'isilon.com' : 'Isilon',
 }
+
+# CVE-2026-99362: the smallest reply size the Linux server takes for a session, a SEQUENCE
+# result does not fit in it. The reply cache of the slots has to be larger than any reply
+# of the session, so that nothing the server may cache during the check is near its end.
+SEQ_PROBE_MAXRESPONSE = 64
+SEQ_PROBE_MIN_CACHED = 1024
 
 VULNERABLE = JSONStatus.VULNERABLE
 OK = JSONStatus.OK
@@ -251,6 +260,7 @@ def empty_nfs4_report():
 		"server": {"major_id": None, "scope": None, "impl_domain": None, "impl_name": None, "impl_date": None},
 		"root_fh": "",
 		"exports": {},
+		"cve_2026_99362": {"status": UNKNOWN, "reason": ""},
 	}
 
 
@@ -383,6 +393,117 @@ class NFS4Analyzer:
 		if impl['domain'] == 'kernel.org':
 			text += " " + self.colors.warn("(kernel version of the server)")
 		self._out(text)
+
+	# ----------------------------------------------------------------- #
+	# CVE-2026-99362
+	# ----------------------------------------------------------------- #
+	def _is_linux(self):
+		server = self.report["server"]
+		if server["impl_domain"] is not None:
+			return IMPL_DOMAINS.get(server["impl_domain"].lower()) == 'Linux'
+		# kernels that do not introduce themselves: by the file handle
+		return self.report["root_fh"].startswith("0100")
+
+	async def check_sequence_preflight(self):
+		"""
+		CVE-2026-99362: the Linux server accepted the seqid of a slot before it knew that the
+		SEQUENCE result fits in the reply, and with the right sizes the reply was then copied
+		past the end of the reply cache of the slot. The fixed server refuses the SEQUENCE
+		first and leaves the slot alone.
+
+		That order is what is tested: a session of its own whose replies are too small for
+		any SEQUENCE, then two of them with the seqids 1 and 2. Both fail. If the second is
+		refused for its size and not for its seqid, the first one has moved the slot. Nothing
+		is asked to be cached, and the reply cache is left at its normal size.
+		"""
+		res = self.report["cve_2026_99362"]
+		if not any(v > 0 for v in self.report["minor_versions"]):
+			res["reason"] = "no_sessions"
+			return
+		minor = self.report["used_minor_version"] or 1
+		# the sizes of the replies are known with AUTH_SYS only
+		rpc = RPC(self.get_target(), AUTH_SYS(uid = NOBODY, gid = NOBODY, gids = [NOBODY]))
+		clientid = None
+		sessionid = None
+
+		async def call(compound):
+			data, err = await rpc.call(NFS_PROGRAM, NFS_V4, NFSPROC4_COMPOUND, compound.to_bytes())
+			if err is not None:
+				raise err
+			return compound.results(data)
+
+		try:
+			_, err = await rpc.connect(NFS_PROGRAM, NFS_V4)
+			if err is not None:
+				raise err
+			status, results = await call(Compound(minor).exchange_id(os.urandom(NFS4_VERIFIER_SIZE), b'anfs-' + os.urandom(8).hex().encode()))
+			if status != 0:
+				res["reason"] = "exchange_id_%s" % self._statname(status)
+				return
+			clientid = results[0][2]['clientid']
+			status, results = await call(Compound(minor).create_session(
+				clientid, results[0][2]['sequenceid'], maxresponsesize = SEQ_PROBE_MAXRESPONSE, maxrequests = 1))
+			if status != 0:
+				# NFS-Ganesha for one does not take a session this small
+				res["reason"] = "create_session_%s" % self._statname(status)
+				return
+			sessionid = results[0][2]['sessionid']
+			attrs = results[0][2]['fore_chan_attrs']
+			if attrs['maxresponsesize'] != SEQ_PROBE_MAXRESPONSE or attrs['maxresponsesize_cached'] < SEQ_PROBE_MIN_CACHED:
+				res["reason"] = "sizes_not_accepted"
+				return
+
+			statuses = []
+			for seqid in (1, 2):
+				status, _ = await call(Compound(minor).sequence(sessionid, seqid, 0, 0))
+				statuses.append(status)
+			if statuses[0] != nfsstat4.NFS4ERR_REP_TOO_BIG:
+				res["reason"] = "sequence_%s" % self._statname(statuses[0])
+			elif statuses[1] == nfsstat4.NFS4ERR_SEQ_MISORDERED:
+				res["status"] = OK
+				res["reason"] = "slot_kept_on_error"
+			elif statuses[1] != nfsstat4.NFS4ERR_REP_TOO_BIG:
+				res["reason"] = "sequence_%s" % self._statname(statuses[1])
+			elif self._is_linux() is False:
+				res["reason"] = "slot_consumed_not_linux"
+			else:
+				res["status"] = VULNERABLE
+				res["reason"] = "slot_consumed_on_error"
+		except Exception as e:
+			res["status"] = ERROR
+			res["reason"] = str(e)
+		finally:
+			try:
+				if sessionid is not None:
+					await call(Compound(minor).destroy_session(sessionid))
+				if clientid is not None:
+					await call(Compound(minor).destroy_clientid(clientid))
+			except Exception:
+				pass
+			await rpc.disconnect()
+			self._print_sequence_preflight()
+
+	def _print_sequence_preflight(self):
+		res = self.report["cve_2026_99362"]
+		if res["status"] == VULNERABLE:
+			self._out(self.colors.error(
+				"CVE-2026-99362: the server accepts a slot before it checks that the SEQUENCE reply fits. "
+				"Its session reply cache can be overflowed without authentication (fixed in Linux 6.12.117, 6.18.61, 7.3.2)"))
+		elif res["status"] == OK:
+			self._out(self.colors.ok("CVE-2026-99362: not affected, a SEQUENCE that does not fit leaves the slot alone"))
+		elif res["status"] == ERROR:
+			self._out(self.colors.warn("CVE-2026-99362: check failed: %s" % res["reason"]))
+		elif self._is_linux():
+			self._out(self.colors.warn("CVE-2026-99362: could not be tested (%s)" % res["reason"]))
+		else:
+			self._out("CVE-2026-99362: not tested, not a Linux server (%s)" % res["reason"])
+
+	@staticmethod
+	def _statname(status):
+		try:
+			return nfsstat4(status).name
+		except ValueError:
+			return str(status)
 
 	# ----------------------------------------------------------------- #
 	# Namespace

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 #
-# NFSv3 security analyzer for anfs.
+# NFS security analyzer for anfs.
 #
-# This is an async re-implementation of the NFSv3-relevant checks from
+# The NFSv3 part is an async re-implementation of the NFSv3-relevant checks from
 # hvs-consulting's nfs_analyze tool (https://github.com/hvs-consulting/nfs-security-tooling),
 # built on top of anfs' Portmap / Mount / NFSv3Client primitives.
+# The NFSv4 checks are in anfs.utils.analyzer4.
 #
 # Checks implemented:
 #   - Portmap service/version summary and warnings
@@ -14,9 +15,10 @@
 #   - /etc/shadow read attempt (no_root_squash / shadow-group GID / world readable)
 #   - no_root_squash check (WRITES a test directory to the server; opt-in)
 #   - Windows file handle signing check
+#   - Root squash, uid spoofing and write access per export, tested with ACCESS (writes nothing)
+#   - NFSv4: minor versions, server identity, exports found by walking the namespace,
+#     the same export having different rules over NFSv3 and NFSv4
 #   - Server OS guessing
-#
-# NFSv4 specific checks from the original tool are out of scope (anfs is v3-only).
 import io
 import json
 import asyncio
@@ -27,22 +29,19 @@ import traceback
 from pathlib import PurePosixPath
 
 from anfs.protocol.nfs3.common.factory import NFS3ConnectionFactory
-from anfs.protocol.rpc.messages import AUTH_SYS
 from anfs.protocol.rpc.common.exceptions import RPCReplyDeniedException, RPCCallRejectedException
 from anfs.protocol.nfs3.messages import (
 	NFS3_OK, NFS3ERR_ROFS, NFS3ERR_ACCES, NFS3ERR_EXIST, NFSSTAT3,
 )
 import anfs.protocol.mount.messages as mountconst
+from anfs.utils.analyzer_common import (
+	JSONStatus, AUTH_FLAVOR_NAMES, auth_flavor_to_str, Coloring, printable_len, format_table, make_cred,
+)
+from anfs.utils.analyzer4 import (
+	NFS4Analyzer, ProbeEntry, probe_access, access_labels, empty_access_result, empty_nfs4_report, IMPL_DOMAINS,
+)
 
 logger = logging.getLogger(__name__)
-
-
-class JSONStatus:
-	OK = "ok"
-	SKIPPED = "skipped"
-	UNKNOWN = "unknown"
-	ERROR = "error"
-	VULNERABLE = "vulnerable"
 
 
 class FileID:
@@ -106,97 +105,13 @@ PMAP_PROTOCOL_NUMBERS = {
 	1073741824: "nfs4cbd (HP-UX)",
 }
 
-AUTH_FLAVOR_NAMES = {
-	0: "none",
-	1: "sys",
-	3: "dh",
-	390003: "krb5",
-	390004: "krb5i",
-	390005: "krb5p",
-}
+def is_ganesha_handle(fh):
+	"""NFS-Ganesha handles start with the version of the handle format (0x43) and a flag byte"""
+	return fh is not None and len(fh) >= 4 and fh[0] == 0x43 and fh[1] in (0, 1)
 
 
 def pmap_num_to_str(prog):
 	return PMAP_PROTOCOL_NUMBERS.get(prog, "Unknown service %s" % prog)
-
-
-def auth_flavor_to_str(flavor):
-	return AUTH_FLAVOR_NAMES.get(flavor, str(flavor))
-
-
-# --------------------------------------------------------------------------- #
-# Colored / plain output helpers
-# --------------------------------------------------------------------------- #
-class Coloring:
-	def __init__(self, enabled=True):
-		self.enabled = enabled
-		self.OK = ""
-		self.WARN = ""
-		self.ERROR = ""
-		self.RESET = ""
-		if enabled:
-			try:
-				import colorama
-				colorama.just_fix_windows_console()
-				self.OK = colorama.Fore.GREEN
-				self.WARN = colorama.Fore.YELLOW
-				self.ERROR = colorama.Fore.RED
-				self.RESET = colorama.Style.RESET_ALL
-			except Exception:
-				self.enabled = False
-
-	def _wrap(self, text, color):
-		if not self.enabled:
-			return text
-		return "%s%s%s" % (color, text, self.RESET)
-
-	def ok(self, text):
-		return self._wrap(text, self.OK)
-
-	def warn(self, text):
-		return self._wrap(text, self.WARN)
-
-	def error(self, text):
-		return self._wrap(text, self.ERROR)
-
-
-def printable_len(string):
-	length = 0
-	escape_sequence = False
-	for c in string:
-		if not escape_sequence:
-			if c == "\033":
-				escape_sequence = True
-			else:
-				length += 1
-		else:
-			if c == "m":
-				escape_sequence = False
-	return length
-
-
-def format_table(rows):
-	if len(rows) <= 1:
-		return "[empty]"
-	columns = len(rows[0])
-	max_lens = [0] * columns
-	for row in rows:
-		for i in range(columns):
-			max_lens[i] = max(max_lens[i], printable_len(str(row[i])))
-	lines = []
-	for row in rows:
-		parts = []
-		for i in range(columns):
-			cell = str(row[i])
-			parts.append(cell + " " * (max_lens[i] - printable_len(cell)))
-		lines.append(" ".join(parts).rstrip())
-	return "\n".join(lines)
-
-
-def make_cred(uid, gid, gids=None, machinename="anfs", stamp=None):
-	if gids is None:
-		gids = [gid]
-	return AUTH_SYS(uid=uid, gid=gid, gids=gids, machinename=machinename, stamp=stamp)
 
 
 # --------------------------------------------------------------------------- #
@@ -221,6 +136,8 @@ def _empty_export_entry():
 			"read_file": {"status": JSONStatus.SKIPPED, "reason": "", "path": None, "content": None, "size": 0},
 		},
 		"no_root_squash": {"status": JSONStatus.SKIPPED, "reason": ""},
+		# root squash, uid spoofing and write access as told by ACCESS, see analyzer4.probe_access
+		"access": empty_access_result(),
 	}
 
 
@@ -233,6 +150,9 @@ def default_report():
 		"invalid_exports": {},
 		"connected_clients": [],
 		"windows_handle_signing": {"status": JSONStatus.UNKNOWN, "reason": ""},
+		"nfs4": empty_nfs4_report(),
+		# exports that have different rules over NFSv3 and NFSv4
+		"version_differences": [],
 		"os": {"final_guess": JSONStatus.UNKNOWN, "checks": {}},
 	}
 
@@ -244,8 +164,12 @@ class NFS3Analyzer:
 	def __init__(self, factory: NFS3ConnectionFactory, check_no_root_squash=False,
 				btrfs_subvolumes=16, do_ping=False, charset="utf-8", colors=None,
 				verbose_errors=False, quiet=False, read_file_path=None,
-				read_file_max_size=None):
+				read_file_max_size=None, check_v3=True, check_v4=True, v4_depth=3):
 		self.factory = factory
+		self.check_v3 = check_v3
+		self.check_v4 = check_v4
+		# how deep the NFSv4 namespace is walked when looking for exports
+		self.v4_depth = v4_depth
 		self.check_norootsquash = check_no_root_squash
 		self.btrfs_subvolumes = btrfs_subvolumes
 		# When set, every successfully escaped export additionally attempts to read
@@ -265,6 +189,8 @@ class NFS3Analyzer:
 		self.report = default_report()
 		# directory(str) -> (file_handle_bytes_or_None, auth_sys_bool)
 		self.mount_results = {}
+		# directory(str) -> file id of the export's root, to find the export over NFSv4
+		self.export_fileids = {}
 		self._ping_cache = {}
 		self._lines = []
 
@@ -334,9 +260,9 @@ class NFS3Analyzer:
 		if not supports(100003):
 			self._out(self.colors.error("Server does not support nfs"))
 		elif not supports(100003, 3) and not supports(100003, 4):
-			self._out(self.colors.error("Server only supports old NFS versions, this tool only supports v3"))
+			self._out(self.colors.error("Server only supports old NFS versions, this tool only supports v3 and v4"))
 		elif not supports(100003, 3):
-			self._out(self.colors.warn("Server does not support NFSv3 (this tool only checks v3)"))
+			self._out(self.colors.warn("Server does not support NFSv3"))
 
 		if not supports(100005):
 			self._out(self.colors.error("Server does not support mountd"))
@@ -496,6 +422,12 @@ class NFS3Analyzer:
 				entry["reason"] = "not_windows"
 				self._out(self.colors.ok("NFSv3 Windows File Handle Signing: OK") +
 						", server probably not Windows (file handle not 32 bytes)")
+				return
+			if is_ganesha_handle(fh):
+				entry["status"] = JSONStatus.OK
+				entry["reason"] = "not_windows"
+				self._out(self.colors.ok("NFSv3 Windows File Handle Signing: OK") +
+						", server probably not Windows (NFS-Ganesha file handle)")
 				return
 			if fh[-10:] == b"\x00" * 10:
 				entry["status"] = JSONStatus.VULNERABLE
@@ -791,6 +723,88 @@ class NFS3Analyzer:
 			json_entry["reason"] = "correct_permissions"
 
 	# ----------------------------------------------------------------- #
+	# Root squash / uid spoofing / write access without writing
+	# ----------------------------------------------------------------- #
+	async def check_access(self, nfs):
+		async def access(fh, mask, cred):
+			granted, status = await nfs.access_raw(fh, mask, cred=cred)
+			if status != NFS3_OK:
+				return None
+			return granted
+
+		self._out("")
+		self._out("Checking how the exports treat user ids (nothing is written)")
+		data = [("Export", "Root squash", "UID spoofing", "Writable as")]
+		for directory, (fh, auth_sys) in self.mount_results.items():
+			if fh is None:
+				continue
+			if not auth_sys:
+				data.append((directory, self.colors.ok("AUTH_SYS not supported"), "", ""))
+				continue
+			entries, status = await nfs.readdirplus_raw(bytes(fh), cred=make_cred(0, 0, gids=[0]))
+			if not isinstance(entries, list) or status != NFS3_OK:
+				reason = NFSSTAT3.get(status, str(status))
+				self.report["exports"]["directories"][directory]["access"]["root_squash"]["reason"] = reason
+				data.append((directory, self.colors.warn("listing failed: %s" % reason), "", ""))
+				continue
+
+			root = ProbeEntry('.', bytes(fh), None, None, None, True)
+			children = []
+			for entry in entries:
+				name = self._decode(entry.name)
+				if name == '.':
+					root = ProbeEntry('.', bytes(fh), entry.uid, entry.gid, entry.mode, True)
+					self.export_fileids[directory] = entry.fileid
+				elif name != '..' and entry.filehandle is not None:
+					children.append(ProbeEntry(name, entry.filehandle, entry.uid, entry.gid, entry.mode))
+			if root.mode is None:
+				# the server does not list '.', ask for it
+				ga, err = await nfs.getattr_raw(bytes(fh), cred=make_cred(0, 0, gids=[0]))
+				if err is None and ga is not None and ga.status == NFS3_OK and ga.attributes is not None:
+					root = ProbeEntry('.', bytes(fh), ga.attributes.uid, ga.attributes.gid, ga.attributes.mode, True)
+					self.export_fileids[directory] = ga.attributes.fileid
+
+			res = await probe_access(root, children, access)
+			self.report["exports"]["directories"][directory]["access"] = res
+			data.append((directory,) + access_labels(self.colors, res))
+		self._out(format_table(data))
+
+	# ----------------------------------------------------------------- #
+	# NFSv4
+	# ----------------------------------------------------------------- #
+	async def check_nfs4(self, walk=True):
+		"""
+		The NFSv4 checks, see anfs.utils.analyzer4. Without 'walk' only the versions and the
+		identity of the server are collected (two round trips).
+		"""
+		nfs4 = NFS4Analyzer(self, max_depth=self.v4_depth)
+		self._out("")
+		versions = await nfs4.check_versions()
+		if versions is None:
+			return
+		err = await nfs4.connect(versions)
+		if err is not None:
+			return
+		try:
+			nfs4.check_server()
+			if walk is False:
+				return
+			await nfs4.walk()
+			v3_exports = {}
+			for directory, fileid in self.export_fileids.items():
+				v3_exports[directory] = (fileid, self.report["exports"]["directories"][directory]["access"])
+			if len(v3_exports) > 0:
+				await nfs4.compare_with_v3(v3_exports)
+		except Exception as e:
+			if self.verbose_errors:
+				traceback.print_exc()
+			self.report["nfs4"]["status"] = JSONStatus.ERROR
+			self.report["nfs4"]["reason"] = str(e)
+			self._out(self.colors.error("NFSv4 checks failed: %s" % e))
+		finally:
+			await nfs4.disconnect()
+
+	# ----------------------------------------------------------------- #
 	# no_root_squash (writes to the server)
 	# ----------------------------------------------------------------- #
 	async def check_no_root_squash(self, nfs):
@@ -880,11 +894,13 @@ class NFS3Analyzer:
 
 		linux_fh_0100 = None
 		windows_fh_32 = None
+		ganesha_fh = None
 		freebsd_subnet = None
 		directories = self.report["exports"]["directories"]
 		if self.report["exports"]["status"] == JSONStatus.OK and directories:
 			linux_fh_0100 = True
 			windows_fh_32 = True
+			ganesha_fh = True
 			valid_export = False
 			has_normal_subnet = False
 			has_freebsd_subnet = False
@@ -893,7 +909,9 @@ class NFS3Analyzer:
 				if fh:
 					valid_export = True
 					linux_fh_0100 &= (fh[0:4] == "0100")
-					windows_fh_32 &= (len(fh) == 64)
+					ganesha_fh &= is_ganesha_handle(bytes.fromhex(fh))
+					# NFS-Ganesha has handles of the same size
+					windows_fh_32 &= (len(fh) == 64 and not is_ganesha_handle(bytes.fromhex(fh)))
 				for client in export.get("allowed_clients", []):
 					valid_export = True
 					has_normal_subnet |= (client["type"] == "subnet")
@@ -905,10 +923,31 @@ class NFS3Analyzer:
 			if not valid_export:
 				linux_fh_0100 = None
 				windows_fh_32 = None
+				ganesha_fh = None
 				freebsd_subnet = None
 
-		# NFSv4-dependent signals are not available in a v3-only tool.
+		# what NFSv4 tells
+		nfs4 = self.report["nfs4"]
 		windows_versions = None
+		nfs4_impl = None
+		if nfs4["status"] == JSONStatus.OK:
+			# the NFS server of Windows has NFSv4.1 and nothing else of NFSv4
+			windows_versions = nfs4["minor_versions"] == [1]
+			if nfs4["root_fh"]:
+				root_fh = bytes.fromhex(nfs4["root_fh"])
+				if ganesha_fh is None:
+					ganesha_fh = is_ganesha_handle(root_fh)
+				if linux_fh_0100 is None:
+					linux_fh_0100 = root_fh[0:2] == b"\x01\x00"
+			server = nfs4["server"]
+			if server["impl_domain"] is not None:
+				nfs4_impl = IMPL_DOMAINS.get(server["impl_domain"].lower())
+			if nfs4_impl is None and server["major_id"] is not None:
+				major_id = server["major_id"].lower()
+				if major_id.startswith("ganesha"):
+					nfs4_impl = "NFS-Ganesha"
+				elif major_id == "knfsd":
+					nfs4_impl = "Linux"
 		hpux_resetting = None
 
 		texts = {
@@ -921,32 +960,47 @@ class NFS3Analyzer:
 		output = [
 			("OS", "Property", "Fulfilled"),
 			("Linux", "File handles start with 0x0100", texts[linux_fh_0100]),
+			("NFS-Ganesha", "File handles start with 0x43", texts[ganesha_fh]),
 			("Windows", "NFSv3 file handles are 32 bytes long", texts[windows_fh_32]),
+			("Windows", "Only version 4.1 of NFSv4 is supported", texts[windows_versions]),
 			("FreeBSD", "Mountd reports subnets without mask", texts[freebsd_subnet]),
 			("NetApp", "netapp partner protocol supported", texts[netapp_service]),
+			(nfs4_impl or "Any", "NFSv4 server introduces itself",
+				self.colors.ok(nfs4_impl) if nfs4_impl is not None else texts[None]),
 		]
 		self._out(format_table(output))
 
 		final_guess = "Unknown"
-		if netapp_service:
+		if nfs4_impl is not None:
+			# the server said it
+			final_guess = nfs4_impl
+		elif netapp_service:
 			final_guess = "NetApp"
-		elif windows_fh_32:
+		elif ganesha_fh:
+			final_guess = "NFS-Ganesha"
+		elif windows_fh_32 and windows_versions is not False:
 			final_guess = "Windows"
 		elif freebsd_subnet:
 			final_guess = "FreeBSD"
 		elif linux_fh_0100:
 			final_guess = "Linux"
+		elif windows_versions and windows_fh_32 is None:
+			final_guess = "Windows"
 		self._out("")
 		self._out("Final OS guess: %s" % final_guess)
+		if nfs4_impl == "Linux" and nfs4["server"]["impl_name"]:
+			self._out("Kernel: %s" % nfs4["server"]["impl_name"])
 
 		self.report["os"]["final_guess"] = final_guess
 		self.report["os"]["checks"] = {
 			"linux_fh_0100": linux_fh_0100,
+			"ganesha_fh": ganesha_fh,
 			"windows_fh_32": windows_fh_32,
 			"windows_versions": windows_versions,
 			"freebsd_subnet": freebsd_subnet,
 			"netapp_service": netapp_service,
 			"hpux_resetting": hpux_resetting,
+			"nfs4_implementation": nfs4_impl,
 		}
 
 	# ----------------------------------------------------------------- #
@@ -986,16 +1040,12 @@ class NFS3Analyzer:
 	# ----------------------------------------------------------------- #
 	# Orchestration
 	# ----------------------------------------------------------------- #
-	async def run(self):
-		self.report["date"] = str(datetime.datetime.now())
-		self.report["target"] = str(self.factory.get_target().ip)
-		self._out("Checking host %s" % self.report["target"])
-
+	async def run_v3(self):
 		mappings = await self.check_portmap()
-		if mappings is None:
-			# Without portmap we cannot continue with mountd reliably.
-			self.guess_os()
-			return self.report
+		if mappings is None and self.factory.get_target().mount_port == 0:
+			# Without portmap the port of mountd is not known
+			self._out(self.colors.warn("NFSv3 checks skipped (the mountport URL parameter would tell where mountd is)"))
+			return
 
 		self._out("")
 		await self.collect_exports()
@@ -1010,10 +1060,21 @@ class NFS3Analyzer:
 			else:
 				try:
 					await self.try_escape(nfs)
+					await self.check_access(nfs)
 					if self.check_norootsquash:
 						await self.check_no_root_squash(nfs)
 				finally:
 					await nfs.disconnect()
+
+	async def run(self):
+		self.report["date"] = str(datetime.datetime.now())
+		self.report["target"] = str(self.factory.get_target().ip)
+		self._out("Checking host %s" % self.report["target"])
+
+		if self.check_v3:
+			await self.run_v3()
+		if self.check_v4:
+			await self.check_nfs4()
 
 		self.guess_os()
 		return self.report
@@ -1023,7 +1084,8 @@ class NFS3Analyzer:
 # Entry point
 # --------------------------------------------------------------------------- #
 async def analyze(url, check_no_root_squash=False, btrfs_subvolumes=16, do_ping=False,
-				no_color=False, charset="utf-8", verbose_errors=False, json_file=None):
+				no_color=False, charset="utf-8", verbose_errors=False, json_file=None,
+				check_v3=True, check_v4=True, v4_depth=3):
 	factory = NFS3ConnectionFactory.from_url(url)
 	colors = Coloring(enabled=not no_color)
 	analyzer = NFS3Analyzer(
@@ -1034,6 +1096,9 @@ async def analyze(url, check_no_root_squash=False, btrfs_subvolumes=16, do_ping=
 		charset=charset,
 		colors=colors,
 		verbose_errors=verbose_errors,
+		check_v3=check_v3,
+		check_v4=check_v4,
+		v4_depth=v4_depth,
 	)
 	report = await analyzer.run()
 	if json_file is not None:
@@ -1046,7 +1111,7 @@ def main():
 	import argparse
 
 	parser = argparse.ArgumentParser(
-		description="Analyze an NFSv3 server for common security issues (anfs port of nfs_analyze)")
+		description="Analyze an NFS server (v3 and v4) for common security issues")
 	parser.add_argument("url", help="Connection string in URL format, e.g. nfs://10.0.0.1")
 	parser.add_argument("--check-no-root-squash", action="store_true",
 						help="Test if no_root_squash is enabled. WARNING: THIS WRITES A TEST DIRECTORY ON THE SERVER")
@@ -1054,6 +1119,10 @@ def main():
 						help="Number of subvolumes to probe when escaping a BTRFS export")
 	parser.add_argument("--ping", action="store_true",
 						help="Ping hosts/clients reported by mountd to determine if they are up")
+	parser.add_argument("--no-v3", action="store_true", help="Skip the NFSv3 checks (portmap, mountd, export escape)")
+	parser.add_argument("--no-v4", action="store_true", help="Skip the NFSv4 checks")
+	parser.add_argument("--v4-depth", type=int, default=3,
+						help="How deep the NFSv4 namespace is walked when looking for exports")
 	parser.add_argument("--no-color", action="store_true", help="Disable colored output")
 	parser.add_argument("--charset", default="utf-8", help="Charset used by the server")
 	parser.add_argument("--json-file", help="Write the full result as JSON to this file")
@@ -1070,6 +1139,9 @@ def main():
 			charset=args.charset,
 			verbose_errors=args.verbose_errors,
 			json_file=args.json_file,
+			check_v3=not args.no_v3,
+			check_v4=not args.no_v4,
+			v4_depth=args.v4_depth,
 		))
 	except Exception:
 		traceback.print_exc()

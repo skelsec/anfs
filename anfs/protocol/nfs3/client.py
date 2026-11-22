@@ -85,6 +85,22 @@ class NFSv3RawMixin:
 		except Exception as e:
 			return None, e
 
+	async def access_raw(self, fh, access=0x3f, cred=None):
+		"""Returns (granted_access_bits_or_None, status_or_err)."""
+		try:
+			packer = nfs_pro_v3Packer()
+			packer.pack_access3args(access3args(object=nfs_fh3(fh), access=access))
+			data, err = await self.nfs_request(NFS3_PROCEDURE_ACCESS, packer.get_buffer(), cred)
+			if err is not None:
+				raise err
+			unpacker = nfs_pro_v3Unpacker(data)
+			res = unpacker.unpack_access3res()
+			if res['status'] != NFS3_OK:
+				return None, res['status']
+			return res['resok']['access'], NFS3_OK
+		except Exception as e:
+			return None, e
+
 	async def readdirplus_raw(self, dir_fh, cred=None, dircount=4096, maxcount=32768):
 		"""Returns (list[RawDirEntry], status_or_err).
 

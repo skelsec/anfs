@@ -7,6 +7,7 @@ set -e
 # see the comment in /etc/exports
 for d in /srv/exports/*/; do
 	d=${d%/}
+	[ "$d" = /srv/exports/nomount ] && continue
 	mountpoint -q "$d" || mount --bind "$d" "$d"
 done
 

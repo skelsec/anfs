@@ -68,6 +68,7 @@ sets up a new session on its own).
 | `/srv/exports/ro` | read-only, `root_squash` |
 | `/srv/exports/squash` | read-write, `all_squash` |
 | `/srv/exports/secure` | read-write, `root_squash`, client must use a source port below 1024 |
+| `/srv/exports/nomount` | knfsd only: read-write, `no_root_squash` over NFSv3, but not a mount point, so over NFSv4 it has the options of the root export (`ro`, `root_squash`) |
 
 `/srv/outside/secret.txt` and `/srv/etc/shadow` (fake) are on the same
 filesystem but outside of every export, they are the targets of the export

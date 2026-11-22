@@ -4,7 +4,7 @@
 set -e
 ROOT=${1:-/srv}
 
-mkdir -p "$ROOT/exports/rw" "$ROOT/exports/ro" "$ROOT/exports/squash" "$ROOT/exports/secure" "$ROOT/outside"
+mkdir -p "$ROOT/exports/rw" "$ROOT/exports/ro" "$ROOT/exports/squash" "$ROOT/exports/secure" "$ROOT/exports/nomount" "$ROOT/outside"
 
 # a file outside of every export, target of the export escape checks
 echo "this file is outside of every export" > "$ROOT/outside/secret.txt"
@@ -15,7 +15,7 @@ mkdir -p "$ROOT/etc"
 printf 'root:$6$anfslab$notarealhash:19000:0:99999:7:::\nlabuser:$6$anfslab$alsonotarealhash:19000:0:99999:7:::\n' > "$ROOT/etc/shadow"
 chown 0:42 "$ROOT/etc/shadow"; chmod 640 "$ROOT/etc/shadow"
 
-for e in rw ro squash secure; do
+for e in rw ro squash secure nomount; do
 	d="$ROOT/exports/$e"
 	echo "hello from $e" > "$d/hello.txt"
 	mkdir -p "$d/dir1/dir2/dir3" "$d/emptydir" "$d/private" "$d/user1000"

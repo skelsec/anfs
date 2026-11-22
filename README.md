@@ -54,6 +54,37 @@ Examples:
 `anfsclient 'nfs://10.0.0.1:2049/?mountport=20048'` - the portmapper is firewalled but you know the ports.  
 `anfsclient 'nfs://10.0.0.1/?transport=udp'` - NFS over UDP.  
 
+# anfsanalyze
+Checks an NFS server for the usual security problems and prints a report (`--json-file` saves it as JSON).  
+`anfsanalyze nfs://10.0.0.1`
+
+What it looks at:
+- portmapper services, exports and their allowed clients, clients that have something mounted
+- escaping the export to the root of the filesystem (Linux servers without `subtree_check`), reading `/etc/shadow` that way
+- per export: is root squashed, does the server believe any uid we send (uid spoofing), who can write.
+  This is asked from the server with ACCESS calls, nothing is written.
+- NFSv4: supported minor versions, what the server tells about itself (the Linux server sends its full kernel version),
+  the exports found by walking the NFSv4 namespace with their auth methods and the same access checks
+- exports that have different rules over NFSv3 and NFSv4. The Linux server only switches exports at mount points
+  when it is used over NFSv4, an export that is a plain subdirectory of another export gets the options of the parent there.
+- server OS guess
+
+The NFSv4 part only needs the NFS port, it works when the portmapper and mountd are firewalled. `--no-v3` / `--no-v4` skips one of the halves.  
+`--check-no-root-squash` tests root squash by creating (and removing) a directory, this is the only check that writes to the server.
+
+# anfsscan
+The same checks for many targets, one result per line (TSV files in the current directory, or in the directory given with `-o`).  
+`anfsscan <scanner> nfs://x 10.0.0.0/24 targets.txt`
+
+| Scanner | Result |
+|---|---|
+| `exports` | exports, allowed clients, auth methods, file handles |
+| `clients` | clients that have exports mounted |
+| `os` | OS guess, portmapper services |
+| `access` | root squash, uid spoofing, write access per NFSv3 export (writes nothing) |
+| `nfs4` | NFSv4 versions, server identity, exports with the access checks (writes nothing). `--compare-v3` also reports the exports that have different rules over NFSv3 |
+| `vuln` | export escape and `/etc/shadow` read, `--check-no-root-squash` writes to the server |
+
 # Testing
 The `lab` directory has a docker based test lab with two different NFS servers, see [lab/README.md](lab/README.md).  
 `python3 -m pytest tests` runs the tests against it.

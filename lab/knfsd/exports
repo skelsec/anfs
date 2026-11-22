@@ -11,3 +11,7 @@
 /srv/exports/squash   *(rw,insecure,all_squash,no_subtree_check)
 # requires a source port below 1024
 /srv/exports/secure   *(rw,secure,root_squash,no_subtree_check)
+# NOT a mount point: over NFSv3 these options apply, over NFSv4 it is reached
+# through the root export and gets the options of that one (ro, root_squash).
+# anfsanalyze reports exports like this.
+/srv/exports/nomount  *(rw,insecure,no_root_squash,no_subtree_check)

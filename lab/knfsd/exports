@@ -1,4 +1,7 @@
-# v4 pseudo root
+# NFSv4 root, the exports below are reached as /rw, /ro, ... under NFSv4.
+# Every export is a mount point of its own (bind mounted by the entrypoint):
+# nfsd switches from one export to another only when it crosses a mount point,
+# without that the options of this export would apply to all of them.
 /srv/exports          *(ro,fsid=0,insecure,no_subtree_check,crossmnt)
 # read-write, root is root, any source port
 /srv/exports/rw       *(rw,insecure,no_root_squash,no_subtree_check)

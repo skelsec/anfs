@@ -4,6 +4,12 @@ set -e
 /storage.sh
 /fixtures.sh /srv
 
+# see the comment in /etc/exports
+for d in /srv/exports/*/; do
+	d=${d%/}
+	mountpoint -q "$d" || mount --bind "$d" "$d"
+done
+
 modprobe nfsd 2>/dev/null || true
 mkdir -p /proc/fs/nfsd /run/rpcbind /var/lib/nfs/rpc_pipefs /var/lib/nfs/v4recovery
 mountpoint -q /proc/fs/nfsd || mount -t nfsd nfsd /proc/fs/nfsd

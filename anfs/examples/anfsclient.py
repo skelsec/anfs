@@ -17,6 +17,7 @@ from asyauth import logger as authlogger
 from anfs.examples.utils import PathCompleter
 from anfs.external.aiocmd.aiocmd import aiocmd
 from anfs.protocol.nfs3.common.factory import NFS3ConnectionFactory
+from anfs.protocol.rpc.common.target import RPCTarget
 
 
 class NFSClientConsole(aiocmd.PromptToolkitCmd):
@@ -45,6 +46,19 @@ class NFSClientConsole(aiocmd.PromptToolkitCmd):
 
 			logger.debug(self.conn_url.get_credential())
 			logger.debug(self.conn_url.get_target())
+
+			if self.conn_url.is_v4() is True:
+				# no mount protocol in NFSv4, we start at the root of the server
+				self.connection = self.conn_url.get_client4()
+				_, err = await self.connection.connect()
+				if err is not None:
+					raise err
+				print('Connected! -NFSv4.%s-' % self.connection.minorversion)
+				self.__current_mountpoint = ''
+				self.__current_dir_handle = 0
+				self.prompt = '[/]> '
+				await self.do_refreshcurrentdir()
+				return True
 			
 			self.mount = self.conn_url.get_mount()
 			_, err = await self.mount.connect()
@@ -61,6 +75,10 @@ class NFSClientConsole(aiocmd.PromptToolkitCmd):
 		
 	async def do_mounts(self):
 		"""Lists all mountpoints"""
+
+		if self.conn_url.is_v4() is True:
+			print('NFSv4 has no mountpoints, all exports are below the root directory. Use ls and cd!')
+			return True
 		
 		if self.mount is None and await self.do_connect() is False:
 			return False
@@ -94,6 +112,10 @@ class NFSClientConsole(aiocmd.PromptToolkitCmd):
 	async def do_mount(self, mountpoint:str):
 		"""Changes the current mountpoint"""
 
+		if self.conn_url.is_v4() is True:
+			print('NFSv4 has no mountpoints, all exports are below the root directory. Use ls and cd!')
+			return True
+
 		if mountpoint == self.__current_mountpoint:
 			print('Already using this mountpoint!')
 			return True
@@ -125,6 +147,12 @@ class NFSClientConsole(aiocmd.PromptToolkitCmd):
 		
 		self.__current_dirs = {}
 		self.__current_files = {}
+		if self.conn_url.is_v4() is True and self.__current_dir_handle != 0:
+			# NFSv4 servers do not list the parent directory
+			parent, err = await self.connection.lookup(self.__current_dir_handle, '..')
+			if err is None:
+				parent.name = '..'
+				self.__current_dirs['..'] = parent
 		async for fe, err in self.connection.readdirplus(self.__current_dir_handle):
 			if err is not None:
 				raise err
@@ -181,7 +209,7 @@ class NFSClientConsole(aiocmd.PromptToolkitCmd):
 			return False
 		
 		self.__current_dir_handle = self.__current_dirs[dirname].handle
-		self.prompt = '[%s%s]> ' % (self.__current_mountpoint, self.connection.handle_to_path(self.__current_dir_handle))
+		self.prompt = '[%s%s]> ' % (self.__current_mountpoint, self.connection.handle_to_path(self.__current_dir_handle) or '/')
 		await self.do_refreshcurrentdir()
 		return True
 	
@@ -261,7 +289,10 @@ class NFSClientConsole(aiocmd.PromptToolkitCmd):
 			print('File already exists!')
 			return False
 		
-		entry, err = await self.connection.create(self.__current_dir_handle, filename, 1)
+		if self.conn_url.is_v4() is True:
+			entry, err = await self.connection.create(self.__current_dir_handle, filename)
+		else:
+			entry, err = await self.connection.create(self.__current_dir_handle, filename, 1)
 		if err is not None:
 			raise err
 		if entry is not None and entry is not False:
@@ -371,7 +402,7 @@ async def amain(args):
 def main():
 	import argparse
 	
-	parser = argparse.ArgumentParser(description='NFSv3 console')
+	parser = argparse.ArgumentParser(description='NFS console', epilog = NFS3ConnectionFactory.get_help() + RPCTarget.get_help(), formatter_class = argparse.RawDescriptionHelpFormatter)
 	parser.add_argument('-v', '--verbose', action='count', default=0, help='Verbosity, can be stacked')
 	parser.add_argument('-n', '--no-interactive', action='store_true')
 	parser.add_argument('url', help='Connection string in URL format.')

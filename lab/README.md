@@ -5,7 +5,7 @@ Two NFS servers in docker, with identical content, for testing anfs without a NA
 | Service | IP | What | Versions |
 |---|---|---|---|
 | `knfsd` | 172.30.111.10 | Linux kernel NFS server | v3, v4.0, v4.1, v4.2 (TCP and UDP for v3) |
-| `ganesha` | 172.30.111.11 | NFS-Ganesha (userspace) | v3, v4.0, v4.1 |
+| `ganesha` | 172.30.111.11 | NFS-Ganesha (userspace) | v3, v4.0, v4.1, v4.2 |
 
 Nothing is published on the host, talk to the container IPs directly.
 On both servers portmapper is on 111, mountd on 20048 and NFS on 2049.
@@ -40,6 +40,7 @@ Then:
 
     docker compose -f lab/docker-compose.yml up -d --build
     anfsclient nfs://172.30.111.10
+    anfsclient 'nfs://172.30.111.10/?version=4'
     python3 -m pytest tests
 
     docker compose -f lab/docker-compose.yml down       # stop
@@ -47,8 +48,19 @@ Then:
 
 ## Exports
 
-The NFSv3 paths are the same on both servers. Under NFSv4 the kernel server
-exposes them below its pseudo root as `/rw`, `/ro`, ... and so does Ganesha.
+The NFSv3 paths are the same on both servers. Under NFSv4 both servers present
+them directly below the root as `/rw`, `/ro`, ...
+
+On the kernel server every export is bind mounted onto itself. nfsd switches
+from one export to another only at mount points, without this the options of
+the NFSv4 root export (`ro`, `root_squash`) would apply to everything reached
+over NFSv4 - which is how a real server with nested exports on one filesystem
+behaves, but it is not what the tests want.
+
+The kernel server runs with a 15 second grace period and lease time. Right
+after a start it answers NFSv4 IO with `NFS4ERR_GRACE` (the client waits it
+out), and it forgets an NFSv4 client that was idle for 15 seconds (the client
+sets up a new session on its own).
 
 | Path | Options |
 |---|---|

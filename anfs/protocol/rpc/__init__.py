@@ -23,6 +23,15 @@ class RPC:
 		if self.credential is None:
 			self.credential = AUTH_NULL()
 
+	def __fail_pending(self, exc):
+		# Wake every caller currently blocked in call() so they get an error
+		# instead of hanging forever on xid_queue.get() when the reader stops.
+		for queue in self.__xid_table.values():
+			try:
+				queue.put_nowait(exc)
+			except Exception:
+				pass
+
 	async def __handle_incoming(self):
 		try:
 			async for message_data in self.connection.read():		
@@ -35,7 +44,11 @@ class RPC:
 						print('Received a REPLY message, but no matching xid found. XID: %s' % message.xid)
 				else:
 					raise Exception('Received a CALL message, expected a REPLY message')
+			# The peer closed the connection / the stream ended without an
+			# explicit error; still need to release any pending callers.
+			self.__fail_pending(RPCConnectionClosedException())
 		except Exception as e:
+			self.__fail_pending(e)
 			await self.disconnect()
 
 	def next_xid(self):
@@ -118,7 +131,18 @@ class RPC:
 			call.body.data = data
 			
 			await self.__send(call.to_bytes())
-			reply = await xid_queue.get()
+			timeout = getattr(self.target, 'timeout', None)
+			if timeout is not None and timeout > 0:
+				try:
+					reply = await asyncio.wait_for(xid_queue.get(), timeout=timeout)
+				except asyncio.TimeoutError:
+					raise RPCTimeoutException()
+			else:
+				reply = await xid_queue.get()
+			# The reader pushes an exception onto the queue when the connection
+			# drops/errors so we wake up instead of hanging on a lost reply.
+			if isinstance(reply, Exception):
+				raise reply
 			reply = cast(reply_body, reply)
 			if reply.reply_stat != reply_stat.MSG_ACCEPTED:
 				raise RPCReplyDeniedException()
@@ -129,6 +153,10 @@ class RPC:
 				raise RPCCallRejectedException(areply.stat.value)
 			
 			return areply.results, None
+		except (RPCTimeoutException, RPCConnectionClosedException) as e:
+			# Expected, handled error conditions: return them quietly so a lost
+			# reply does not spam the console with a traceback per call.
+			return None, e
 		except Exception as e:
 			traceback.print_exc()
 			return None, e

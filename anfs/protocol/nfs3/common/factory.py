@@ -11,7 +11,7 @@ from anfs.protocol.rpc import RPC
 from anfs.protocol.portmap import Portmap
 from anfs.protocol.mount import Mount
 from anfs.protocol.rpc.common.target import RPCTarget
-from anfs.protocol.rpc.messages import AUTH_SYS
+from anfs.protocol.rpc.messages import AUTH_SYS, AUTH_NULL
 from anfs.protocol.nfs3.client import NFSv3Client
 from asyauth.common.credentials import UniCredential
 
@@ -52,8 +52,10 @@ class NFS3ConnectionFactory:
 
 		target = self.get_target()
 		target.port = 111
-		cred = self.get_credential()
-		return Portmap(target, cred)
+		# The PORTMAP protocol is queried with AUTH_NULL - it carries no
+		# meaningful AUTH_SYS authorization and many implementations silently
+		# drop AUTH_SYS requests. NFS file operations use their own credential.
+		return Portmap(target, AUTH_NULL())
 	
 	def get_mount(self):
 		"""
@@ -64,8 +66,11 @@ class NFS3ConnectionFactory:
 		"""
 		
 		target = self.get_target()
-		cred = self.get_credential()
-		return Mount(target, cred)
+		# mountd is queried with AUTH_NULL for the same reason as portmap above:
+		# AUTH_SYS is meant for NFS file ops, and several mountd implementations
+		# only answer AUTH_NULL (silently dropping AUTH_SYS, which manifests as a
+		# timeout). The actual NFS operations still use the factory credential.
+		return Mount(target, AUTH_NULL())
 
 	def get_client(self, root_handle) -> NFSv3Client:
 		"""

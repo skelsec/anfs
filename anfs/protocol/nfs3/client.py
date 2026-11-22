@@ -17,7 +17,7 @@ from anfs.protocol.nfs3.messages import (NFS3_PROCEDURE_NULL, NFS3_PROCEDURE_GET
 					NFS3_PROCEDURE_REMOVE, NFS3_PROCEDURE_RMDIR, NFS3_PROCEDURE_RENAME, NFS3_PROCEDURE_LINK,
 					NFS3_PROCEDURE_READDIR, NFS3_PROCEDURE_READDIRPLUS, NFS3_PROCEDURE_FSSTAT, NFS3_PROCEDURE_FSINFO,
 					NFS3_PROCEDURE_PATHCONF, NFS3_PROCEDURE_COMMIT, NFS_PROGRAM, NFS_V3, NF3BLK, NF3CHR, NF3FIFO,
-					NF3SOCK, time_how, DONT_CHANGE, SET_TO_CLIENT_TIME, SET_TO_SERVER_TIME)
+					NF3SOCK, time_how, DONT_CHANGE, SET_TO_CLIENT_TIME, SET_TO_SERVER_TIME, NFS3_OK)
 
 from anfs.protocol.nfs3 import logger
 from anfs.protocol.rpc.messages import AUTH_SYS
@@ -26,7 +26,176 @@ class NFSAccessError(Exception):
 	pass
 
 
-class NFSv3Client:
+class RawDirEntry:
+	"""Lightweight directory entry exposing the raw file handle bytes.
+
+	Used by the security analyzer, which needs access to the raw on-the-wire
+	file handle (to craft/inspect handles) rather than the integer id that the
+	NFSv3Client handle map exposes.
+	"""
+	def __init__(self, name=None, filehandle=None, fileid=None, type=None, uid=None, gid=None, mode=None):
+		self.name = name              # bytes
+		self.filehandle = filehandle  # bytes or None
+		self.fileid = fileid
+		self.type = type
+		self.uid = uid
+		self.gid = gid
+		self.mode = mode
+
+	def __repr__(self):
+		return 'RawDirEntry(name=%s, fileid=%s, type=%s, fh=%s)' % (self.name, self.fileid, self.type, self.filehandle)
+
+
+class NFSv3RawMixin:
+	"""Raw file-handle operations for NFSv3.
+
+	These helpers operate directly on raw file handle bytes (bypassing the
+	integer handle map of NFSv3Client) and accept an explicit per-request
+	credential. They return parsed XDR objects (status / resok / resfail),
+	mirroring the primitives used by hvs-consulting's nfs_analyze.
+	"""
+
+	async def getattr_raw(self, fh, cred=None):
+		try:
+			packer = nfs_pro_v3Packer()
+			packer.pack_fhandle3(fh)
+			data, err = await self.nfs_request(NFS3_PROCEDURE_GETATTR, packer.get_buffer(), cred)
+			if err is not None:
+				raise err
+			unpacker = nfs_pro_v3Unpacker(data)
+			return unpacker.unpack_getattr3res(data_format=''), None
+		except Exception as e:
+			return None, e
+
+	async def lookup_raw(self, dir_fh, name, cred=None):
+		try:
+			if isinstance(name, str):
+				name = name.encode()
+			packer = nfs_pro_v3Packer()
+			packer.pack_diropargs3(diropargs3(dir=nfs_fh3(dir_fh), name=name))
+			data, err = await self.nfs_request(NFS3_PROCEDURE_LOOKUP, packer.get_buffer(), cred)
+			if err is not None:
+				raise err
+			unpacker = nfs_pro_v3Unpacker(data)
+			return unpacker.unpack_lookup3res(data_format=''), None
+		except Exception as e:
+			return None, e
+
+	async def readdirplus_raw(self, dir_fh, cred=None, dircount=4096, maxcount=32768):
+		"""Returns (list[RawDirEntry], status_or_err).
+
+		On success status is NFS3_OK and the list contains every entry (paging
+		handled internally). On failure status is the NFS3 error code.
+		"""
+		try:
+			entries = []
+			cookie = 0
+			cookieverf = b'\x00' * 8
+			while True:
+				packer = nfs_pro_v3Packer()
+				packer.pack_readdirplus3args(readdirplus3args(dir=nfs_fh3(dir_fh),
+					cookie=cookie, cookieverf=cookieverf, dircount=dircount, maxcount=maxcount))
+				data, err = await self.nfs_request(NFS3_PROCEDURE_READDIRPLUS, packer.get_buffer(), cred)
+				if err is not None:
+					raise err
+				unpacker = nfs_pro_v3Unpacker(data)
+				res = unpacker.unpack_readdirplus3res(data_format='')
+				if res.status != 0:
+					return entries, res.status
+
+				# The nested entry array is always unpacked as dicts (the XDR
+				# unpacker only threads data_format at the top level), so walk
+				# the linked list with nextiter and use dict access here.
+				current = res.resok.reply.entries
+				if current != []:
+					for node in nextiter(current):
+						entry_fh = None
+						nh = node.get('name_handle')
+						if nh is not None and nh.get('present'):
+							entry_fh = nh['handle']['data']
+						entry = RawDirEntry(name=node['name'], filehandle=entry_fh, fileid=node['fileid'])
+						na = node.get('name_attributes')
+						if na is not None and na.get('present'):
+							attrs = na['attributes']
+							entry.type = attrs['type']
+							entry.uid = attrs['uid']
+							entry.gid = attrs['gid']
+							entry.mode = attrs['mode']
+						entries.append(entry)
+						cookie = node['cookie']
+
+				if res.resok.reply.eof:
+					break
+				cookieverf = res.resok.cookieverf
+			return entries, NFS3_OK
+		except Exception as e:
+			return None, e
+
+	async def read_raw(self, fh, offset=0, count=4096, cred=None):
+		try:
+			packer = nfs_pro_v3Packer()
+			packer.pack_read3args(read3args(file=nfs_fh3(fh), offset=offset, count=count))
+			data, err = await self.nfs_request(NFS3_PROCEDURE_READ, packer.get_buffer(), cred)
+			if err is not None:
+				raise err
+			unpacker = nfs_pro_v3Unpacker(data)
+			return unpacker.unpack_read3res(data_format=''), None
+		except Exception as e:
+			return None, e
+
+	async def read_entire_raw(self, fh, cred=None, chunk=4096, max_size=None):
+		"""Returns (status, data_bytes, err). Reads until eof or max_size."""
+		try:
+			data = b''
+			offset = 0
+			while True:
+				res, err = await self.read_raw(fh, offset, chunk, cred)
+				if err is not None:
+					raise err
+				if res.status != NFS3_OK:
+					return res.status, data, None
+				data += res.resok.data
+				offset += res.resok.count
+				if res.resok.eof or (max_size is not None and len(data) >= max_size):
+					break
+				if res.resok.count == 0:
+					break
+			return NFS3_OK, data, None
+		except Exception as e:
+			return None, None, e
+
+	async def mkdir_raw(self, parent_fh, name, uid=0, gid=0, mode=0o755, cred=None):
+		try:
+			if isinstance(name, str):
+				name = name.encode()
+			attrs = await self.get_sattr3(mode=mode, uid=uid, gid=gid, size=None,
+				atime_flag=DONT_CHANGE, mtime_flag=DONT_CHANGE)
+			packer = nfs_pro_v3Packer()
+			packer.pack_mkdir3args(mkdir3args(where=diropargs3(dir=nfs_fh3(parent_fh), name=name), attributes=attrs))
+			data, err = await self.nfs_request(NFS3_PROCEDURE_MKDIR, packer.get_buffer(), cred)
+			if err is not None:
+				raise err
+			unpacker = nfs_pro_v3Unpacker(data)
+			return unpacker.unpack_mkdir3res(data_format=''), None
+		except Exception as e:
+			return None, e
+
+	async def rmdir_raw(self, parent_fh, name, cred=None):
+		try:
+			if isinstance(name, str):
+				name = name.encode()
+			packer = nfs_pro_v3Packer()
+			packer.pack_diropargs3(diropargs3(dir=nfs_fh3(parent_fh), name=name))
+			data, err = await self.nfs_request(NFS3_PROCEDURE_RMDIR, packer.get_buffer(), cred)
+			if err is not None:
+				raise err
+			unpacker = nfs_pro_v3Unpacker(data)
+			return unpacker.unpack_rmdir3res(data_format=''), None
+		except Exception as e:
+			return None, e
+
+
+class NFSv3Client(NFSv3RawMixin):
 	def __init__(self, root_handle, target, credential=None, encoding='utf-8'):
 		self.root_handle = root_handle
 		self.target = target
@@ -179,7 +348,7 @@ class NFSv3Client:
 			return False, e
 
 
-	async def lookup(self, dir_handle, file_folder):
+	async def lookup(self, dir_handle, file_folder, auth=None):
 		try:
 			dir_handle = self.__handles[dir_handle]
 
@@ -187,7 +356,7 @@ class NFSv3Client:
 			packer.pack_diropargs3(diropargs3(dir=nfs_fh3(dir_handle), name=file_folder.encode()))
 
 			logger.debug("NFSv3 procedure %d: LOOKUP on %s" % (NFS3_PROCEDURE_LOOKUP, self.host))
-			data, err = await self.nfs_request(NFS3_PROCEDURE_LOOKUP, packer.get_buffer())
+			data, err = await self.nfs_request(NFS3_PROCEDURE_LOOKUP, packer.get_buffer(), auth)
 			if err is not None:
 				raise err
 			
@@ -197,9 +366,14 @@ class NFSv3Client:
 			if response['status'] != 0:
 				return False, None
 			
-			entry = NFSFileEntry.from_attrs(response['resok']['obj_attributes']['attributes'])
+			resok = response['resok']
+			oa = resok.get('obj_attributes')
+			if oa is not None and oa.get('attributes') is not None:
+				entry = NFSFileEntry.from_attrs(oa['attributes'])
+			else:
+				entry = NFSFileEntry()
 			entry.name = file_folder
-			entry.handle = self.register_handle(response['resok']['object']['data'], file_folder, dir_handle)
+			entry.handle = self.register_handle(resok['object']['data'], file_folder, dir_handle)
 			return entry, None
 		
 		except Exception as e:
@@ -225,21 +399,21 @@ class NFSv3Client:
 		except Exception as e:
 			return False, e
 
-	async def readlink(self, file_handle):
+	async def readlink(self, file_handle, auth=None):
 		try:
 			file_handle = self.__handles[file_handle]
 			packer = nfs_pro_v3Packer()
 			packer.pack_fhandle3(file_handle)
 
 			logger.debug("NFSv3 procedure %d: READLINK on %s" % (NFS3_PROCEDURE_READLINK, self.host))
-			data, err = await self.nfs_request(NFS3_PROCEDURE_READLINK, packer.get_buffer())
+			data, err = await self.nfs_request(NFS3_PROCEDURE_READLINK, packer.get_buffer(), auth)
 			if err is not None:
 				raise err
 			
 			unpacker = nfs_pro_v3Unpacker(data)
 			result = unpacker.unpack_readlink3res()
 			if result['status'] != 0:
-				raise NFSAccessError(result.status)
+				raise NFSAccessError(result['status'])
 			return result['resok']['data'].decode(self.encoding), None
 		except Exception as e:
 			return False, e
@@ -509,6 +683,32 @@ class NFSv3Client:
 		except Exception as e:
 			yield False, e
 	
+	async def __resolve_entry_via_lookup(self, real_dir_handle, entry, auth):
+		"""Resolve a directory entry's raw file handle (and attributes) via a
+		LOOKUP when the server omitted them from a READDIRPLUS reply. Returns the
+		raw handle bytes or None if it could not be resolved."""
+		try:
+			lres, lerr = await self.lookup_raw(real_dir_handle, entry.name, cred=auth)
+			if lerr is not None or lres is None or lres.status != NFS3_OK:
+				return None
+			oa = lres.resok.obj_attributes
+			if entry.type is None and oa is not None and oa.present:
+				a = oa.attributes
+				entry.type = a.type
+				entry.size = a.size
+				entry.uid = a.uid
+				entry.gid = a.gid
+				entry.mode = a.mode
+				entry.nlink = a.nlink
+				entry.fileid = a.fileid
+				entry.fsid = a.fsid
+				entry.atime = a.atime
+				entry.mtime = a.mtime
+				entry.ctime = a.ctime
+			return lres.resok.object.data
+		except Exception:
+			return None
+
 	# This version was provided by PTG
 	# The original version was not working properly
 	async def readdirplus(self, dir_handle, cookie=0, cookie_verf=b'\x00', dircount=4096, maxcount=32768, auth=None):
@@ -536,6 +736,13 @@ class NFSv3Client:
 			for entry in nextiter(fl.resok.reply.entries):
 				last_cookie = entry['cookie']
 				entry, realhandle = NFSFileEntry.from_dict(entry, encoding=self.encoding)
+				if realhandle is None:
+					# The file handle (and attributes) are optional in a
+					# READDIRPLUS reply and some servers omit them for a subset
+					# of entries. Without a handle the entry is not navigable, so
+					# fall back to a LOOKUP (using the same credential) to fill in
+					# the handle and, when missing, the attributes.
+					realhandle = await self.__resolve_entry_via_lookup(real_dir_handle, entry, auth)
 				entry.handle = self.register_handle(realhandle, entry.name, real_dir_handle)
 				yield entry, None
 						   
@@ -552,9 +759,9 @@ class NFSv3Client:
 			if depth == 0:
 				return
 			
-			if auth == None:
+			if auth is None:
 				attrs, err = await self.getattr(dir_handle)
-				if err == None:
+				if err is None:
 					auth = AUTH_SYS(uid = attrs.uid, gid = attrs.gid)
 				else:
 					auth = AUTH_SYS(uid = 0, gid = 0)

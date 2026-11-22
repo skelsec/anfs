@@ -6,6 +6,14 @@ class RPCException(Exception):
 class RPCReplyException(RPCException):
     pass
 
+class RPCConnectionClosedException(RPCException):
+    def __init__(self, msg='RPC connection closed before a reply was received.'):
+        super().__init__(msg)
+
+class RPCTimeoutException(RPCException):
+    def __init__(self, msg='Timed out waiting for an RPC reply.'):
+        super().__init__(msg)
+
 class RPCReplyDeniedException(RPCReplyException):
     def __init__(self):
         super().__init__('RPC reply denied without reason provided.')

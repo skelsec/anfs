@@ -38,8 +38,8 @@ setup(
 	# long_description=open("README.txt").read(),
 	python_requires='>=3.7',
 	install_requires=[
-		'unicrypto>=0.0.10',
-		'asyauth>=0.0.20',
+		'unicrypto>=0.0.12',
+		'asyauth>=0.0.23',
 		'asysocks>=0.2.12',
 		'prompt-toolkit>=3.0.2',
 		'tqdm',
@@ -58,6 +58,8 @@ setup(
 	entry_points={
 		'console_scripts': [
 			'anfsclient = anfs.examples.anfsclient:main',
+			'anfsanalyze = anfs.utils.analyzer:main',
+			'anfsscan = anfs.utils.analyzer_scanners:main',
 		],
 
 	}

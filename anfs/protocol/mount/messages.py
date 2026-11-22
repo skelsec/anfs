@@ -5,6 +5,31 @@ MNTPATHLEN = 1024
 MNTNAMLEN = 255
 FHSIZE = 32
 
+# mountstat3 (RFC1813)
+MNT3_OK = 0
+MNT3ERR_PERM = 1
+MNT3ERR_NOENT = 2
+MNT3ERR_IO = 5
+MNT3ERR_ACCES = 13
+MNT3ERR_NOTDIR = 20
+MNT3ERR_INVAL = 22
+MNT3ERR_NAMETOOLONG = 63
+MNT3ERR_NOTSUPP = 10004
+MNT3ERR_SERVERFAULT = 10006
+
+MOUNTSTAT3 = {
+    0: 'MNT3_OK',
+    1: 'MNT3ERR_PERM',
+    2: 'MNT3ERR_NOENT',
+    5: 'MNT3ERR_IO',
+    13: 'MNT3ERR_ACCES',
+    20: 'MNT3ERR_NOTDIR',
+    22: 'MNT3ERR_INVAL',
+    63: 'MNT3ERR_NAMETOOLONG',
+    10004: 'MNT3ERR_NOTSUPP',
+    10006: 'MNT3ERR_SERVERFAULT',
+}
+
 def read_str(buf:io.BytesIO, encoding:str='utf-8'):
     sl = int.from_bytes(buf.read(4), byteorder='big', signed=False)
     data = buf.read(sl).decode(encoding)
@@ -65,6 +90,39 @@ class fhstatus:
     
     def __str__(self):
         return 'Status: %s' % self.status
+
+class mountres3:
+    # XDR definition (RFC1813):
+    # union mountres3 switch (mountstat3 fhs_status) {
+    #     case MNT3_OK:
+    #         mountres3_ok mountinfo;  // fhandle3 fhandle; int auth_flavors<>;
+    #     default:
+    #         void;
+    # };
+    def __init__(self):
+        self.status = None
+        self.fhandle = None
+        self.auth_flavors = []
+
+    @staticmethod
+    def from_bytes(data: bytes):
+        return mountres3.from_buffer(io.BytesIO(data))
+
+    @staticmethod
+    def from_buffer(buff: io.BytesIO):
+        result = mountres3()
+        result.status = int.from_bytes(buff.read(4), byteorder='big', signed=False)
+        if result.status == MNT3_OK:
+            fhlen = int.from_bytes(buff.read(4), byteorder='big', signed=False)
+            result.fhandle = buff.read(fhlen)
+            count = int.from_bytes(buff.read(4), byteorder='big', signed=False)
+            for _ in range(count):
+                result.auth_flavors.append(int.from_bytes(buff.read(4), byteorder='big', signed=False))
+        return result
+
+    def __str__(self):
+        return 'mountres3(status=%s, fhandle=%s, auth_flavors=%s)' % (
+            MOUNTSTAT3.get(self.status, self.status), self.fhandle, self.auth_flavors)
 
 class mountpoint:
     def __init__(self):

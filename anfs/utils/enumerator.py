@@ -12,9 +12,15 @@ class NFSFileRes:
 
 		try:
 			self.size = self.obj.size
-			self.sizefmt = NFSFileRes.sizeof_fmt(self.size)
 		except:
+			self.size = None
+		# Normalize the raw size to an integer so the result reliably holds a
+		# numeric value (the human-readable form is derived from it below).
+		try:
+			self.size = int(self.size)
+		except (TypeError, ValueError):
 			self.size = 0
+		self.sizefmt = NFSFileRes.sizeof_fmt(self.size)
 		try:
 			self.creationtime = self.obj.creation_time.isoformat()
 		except:
@@ -85,7 +91,7 @@ class NFSFileRes:
 				'otype' : 'file',
 				'path' : str(self.unc_path),
 				'creationtime' : self.creationtime,
-				'size' : str(self.size),
+				'size' : self.size,
 				'sizefmt' : self.sizefmt,
 			}
 		if self.otype == 'dir' or self.otype == 'symlink':
@@ -134,7 +140,8 @@ class NFS3FileScanner:
 
 					mhandle, err = await mount.mount(mountpoint)
 					if err is not None:
-						raise err
+						await out_queue.put(ScannerError(target, err))
+						continue
 
 					async with newfactory.get_client(mhandle) as nfs:
 						async for epath, etype, entry, err in nfs.enumall(0, depth=self.depth):

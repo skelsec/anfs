@@ -4,14 +4,16 @@
 #  Tamas Jos (@skelsec)
 #
 import os
+import time
 import asyncio
+from pathlib import Path
 
 from anfs.protocol.rpc import RPC
 from anfs.protocol.rpc.common.exceptions import RPCException
 from anfs.protocol.nfs3.pack import NFSFileEntry
 from anfs.protocol.nfs4 import logger
 from anfs.protocol.nfs4.constants import *
-from anfs.protocol.nfs4.xdr import Compound, stateid4, STATEID_ANONYMOUS, FATTR4_DEFAULT
+from anfs.protocol.nfs4.xdr import Compound, stateid4, nfsace4, STATEID_ANONYMOUS, FATTR4_DEFAULT
 
 # https://datatracker.ietf.org/doc/html/rfc8881
 
@@ -30,6 +32,9 @@ NFS4_SESSION_LOST = (
 # The server asks us to come back later
 NFS4_RETRY_LATER = (nfsstat4.NFS4ERR_DELAY, nfsstat4.NFS4ERR_GRACE)
 NFS4_RETRY_COUNT = 10
+# For how long it is asked again. A server that was just (re)started refuses to open
+# files until its grace period is over, that is 90 seconds on Linux.
+NFS4_RETRY_TIMEOUT = 120
 
 class NFS4Error(Exception):
 	def __init__(self, status, op = None):
@@ -96,6 +101,7 @@ class NFSv4Client:
 		self.host = ''
 		self.root_handle = None
 		self.server_info = None
+		self.retry_timeout = NFS4_RETRY_TIMEOUT
 
 		self.clientid = None
 		self.sessionid = None
@@ -203,6 +209,23 @@ class NFSv4Client:
 		self.rpc = None
 		return await rpc.disconnect()
 
+	def set_credential(self, credential):
+		"""
+		Replaces the credential used for the calls from now on. With AUTH_SYS this
+		is all it takes to become another user.
+		"""
+		self.credential = credential
+		if self.rpc is not None:
+			self.rpc.credential = credential
+
+	async def __wait(self, started, attempt):
+		"""Sleeps before the call is repeated, False if the server made us wait for too long already"""
+		delay = min(0.1 * (2 ** attempt), 5)
+		if time.monotonic() - started + delay > self.retry_timeout:
+			return False
+		await asyncio.sleep(delay)
+		return True
+
 	async def __call(self, compound, data = None, auth = None):
 		"""Sends one COMPOUND as it is"""
 		if data is None:
@@ -267,14 +290,16 @@ class NFSv4Client:
 			self.clientid = res[0]['clientid']
 
 	async def __compound40(self, compound, auth = None):
-		for attempt in range(NFS4_RETRY_COUNT):
+		started = time.monotonic()
+		waits = 0
+		while True:
 			status, results = await self.__call(compound, auth = auth)
 			if status == 0:
 				# same layout as with a session, where the result of the SEQUENCE is cut off
 				return [r[2] for r in results]
 			failed = results[-1] if len(results) > 0 else (None, status, None)
-			if status in NFS4_RETRY_LATER:
-				await asyncio.sleep(min(0.1 * (2 ** attempt), 5))
+			if status in NFS4_RETRY_LATER and await self.__wait(started, waits) is True:
+				waits += 1
 				continue
 			break
 		raise NFS4Error(status, failed[0])
@@ -287,7 +312,10 @@ class NFSv4Client:
 		"""
 		if self.minorversion == 0:
 			return await self.__compound40(compound, auth)
-		for attempt in range(NFS4_RETRY_COUNT):
+		started = time.monotonic()
+		waits = 0
+		retries = 0
+		while True:
 			generation = self.__session_generation
 			sessionid = self.sessionid
 			slots = self.__slots
@@ -312,6 +340,14 @@ class NFSv4Client:
 				return [r[2] for r in results[1:]]
 
 			failed = results[-1] if len(results) > 0 else (OP.SEQUENCE, status, None)
+			if status in NFS4_RETRY_LATER:
+				if await self.__wait(started, waits) is False:
+					break
+				waits += 1
+				continue
+			retries += 1
+			if retries >= NFS4_RETRY_COUNT:
+				break
 			if status == nfsstat4.NFS4ERR_RETRY_UNCACHED_REP:
 				# The reply of the previous call on this slot did not arrive (or was not valid),
 				# the server takes this call for a repeat of that one. The slot is past that now.
@@ -320,10 +356,7 @@ class NFSv4Client:
 				logger.debug('NFSv4 session lost (%s), creating a new one' % nfsstat4(status).name)
 				await self.__establish_session(generation)
 				continue
-			if status in NFS4_RETRY_LATER:
-				await asyncio.sleep(min(0.1 * (2 ** attempt), 5))
-				continue
-			raise NFS4Error(status, failed[0])
+			break
 		raise NFS4Error(status, failed[0])
 
 	@staticmethod
@@ -578,6 +611,71 @@ class NFSv4Client:
 		except Exception as e:
 			return False, e
 
+	async def write_file(self, file_handle, content, offset = 0, stable_how = FILE_SYNC4, auth = None):
+		"""Same as write(), with the signature of the NFSv3 client"""
+		return await self.write(file_handle, offset, content, stable_how, auth)
+
+	async def upload_file(self, dir_handle, file_name, local_path, mode = 0o644, exclusive = False, progress_cb = None, auth = None):
+		"""
+		Creates file_name in the directory and fills it with the contents of the local file
+		(a path or a file object opened for binary reading). An existing file is overwritten
+		unless exclusive is set. progress_cb is called with the size of each chunk written.
+		"""
+		try:
+			res, err = await self.open(dir_handle, file_name, create = True, exclusive = exclusive, mode = mode, auth = auth)
+			if err is not None:
+				raise err
+			entry, stateid = res
+			f = open(local_path, 'rb') if isinstance(local_path, (str, Path)) else local_path
+			try:
+				if entry.size:
+					_, err = await self.setattr(entry.handle, size = 0, auth = auth, stateid = stateid)
+					if err is not None:
+						raise err
+				chunk = self.max_write_size()
+				offset = 0
+				while True:
+					data = f.read(chunk)
+					if len(data) == 0:
+						break
+					_, err = await self.write(entry.handle, offset, data, auth = auth, stateid = stateid)
+					if err is not None:
+						raise err
+					offset += len(data)
+					if progress_cb is not None:
+						progress_cb(len(data))
+			finally:
+				if f is not local_path:
+					f.close()
+				await self.close(entry.handle, stateid, auth)
+			entry.size = offset
+			return entry, None
+		except Exception as e:
+			return False, e
+
+	async def download_file(self, file_handle, local_path, chunk_size = 1024 * 1024, max_size = None, progress_cb = None, auth = None):
+		"""Downloads a file to local_path (if that is a directory the file keeps its name)"""
+		try:
+			local_path = Path(local_path)
+			if local_path.is_dir():
+				local_path = local_path.joinpath(self.__handle_name_map[self.__handles[file_handle]])
+			bytes_read = 0
+			with open(local_path, 'wb') as f:
+				while max_size is None or bytes_read < max_size:
+					data, err = await self.read(file_handle, bytes_read, chunk_size, auth = auth)
+					if err is not None:
+						raise err
+					# a read at the end of the file returns nothing
+					if len(data) == 0:
+						break
+					f.write(data)
+					bytes_read += len(data)
+					if progress_cb is not None:
+						progress_cb(len(data))
+			return local_path, None
+		except Exception as e:
+			return False, e
+
 	async def commit(self, file_handle, count = 0, offset = 0, auth = None):
 		try:
 			fh = self.__handles[file_handle]
@@ -661,6 +759,40 @@ class NFSv4Client:
 			logger.debug('NFSv4 SETATTR on %s' % self.host)
 			c = Compound(self.minorversion).putfh(fh).setattr(stateid, mode = mode, size = size, owner = uid, owner_group = gid)
 			await self.compound(c, auth)
+			return True, None
+		except Exception as e:
+			return False, e
+
+	##### ACLs
+	async def get_acl(self, file_handle, auth = None):
+		"""
+		The NFSv4 ACL of the file as a list of nfsace4. Servers without ACL support
+		either refuse this (NFS4ERR_ATTRNOTSUPP) or return no ACL: the result is None then.
+		"""
+		try:
+			fh = self.__handles[file_handle]
+			logger.debug('NFSv4 GETATTR (ACL) on %s' % self.host)
+			res = await self.compound(Compound(self.minorversion).putfh(fh).getattr([FATTR4_ACL]), auth)
+			return res[1].get('acl'), None
+		except NFS4Error as e:
+			if e.status == nfsstat4.NFS4ERR_ATTRNOTSUPP:
+				return None, None
+			return False, e
+		except Exception as e:
+			return False, e
+
+	async def set_acl(self, file_handle, acl, auth = None, stateid = None):
+		"""
+		Replaces the ACL of the file. acl is a list of nfsace4 or their text forms, eg. 'A::1000:rwx'
+		Servers that store POSIX ACLs (Linux) accept only what can be translated to that.
+		"""
+		try:
+			fh = self.__handles[file_handle]
+			if stateid is None:
+				stateid = STATEID_ANONYMOUS
+			acl = [ace if isinstance(ace, nfsace4) else nfsace4.from_string(ace) for ace in acl]
+			logger.debug('NFSv4 SETATTR (ACL) on %s' % self.host)
+			await self.compound(Compound(self.minorversion).putfh(fh).setattr(stateid, acl = acl), auth)
 			return True, None
 		except Exception as e:
 			return False, e

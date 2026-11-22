@@ -1,11 +1,16 @@
+import io
+import os
 import uuid
 
 import pytest
+
+from conftest import LAB_SERVERS
 
 from anfs.protocol.nfs3.common.factory import NFS3ConnectionFactory
 from anfs.protocol.nfs4.client import NFS4Error
 from anfs.protocol.nfs4.constants import nfsstat4, NF4DIR, NF4LNK, NF4REG, NF4FIFO, ACCESS4_READ, ACCESS4_MODIFY
 from anfs.protocol.rpc.messages import AUTH_SYS
+from anfs.protocol.nfs4.xdr import nfsace4
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.timeout(60)]
 
@@ -338,3 +343,113 @@ async def test_nfs40_clientid_expiry(server):
 		_, err = await s.nfs.create(s.dir.handle, 'second')
 		assert err is None
 		assert await s.names() == ['first', 'second']
+
+async def test_upload_download(factory, tmp_path):
+	local = tmp_path / 'local.bin'
+	# more than one WRITE even with the biggest IO size
+	local.write_bytes(os.urandom(2 * 1024 * 1024 + 123))
+	async with Scratch(factory) as s:
+		progress = []
+		entry, err = await s.nfs.upload_file(s.dir.handle, 'up.bin', str(local), mode = 0o640, progress_cb = progress.append)
+		assert err is None
+		assert sum(progress) == local.stat().st_size
+		attrs, err = await s.nfs.getattr(entry.handle)
+		assert err is None
+		assert attrs.size == local.stat().st_size
+		assert attrs.mode & 0o7777 == 0o640
+
+		back, err = await s.nfs.download_file(entry.handle, tmp_path / 'back.bin')
+		assert err is None
+		assert back.read_bytes() == local.read_bytes()
+		# into a directory: the file keeps its name
+		back, err = await s.nfs.download_file(entry.handle, tmp_path, max_size = 1000)
+		assert err is None
+		assert back.name == 'up.bin'
+		assert 1000 <= back.stat().st_size < local.stat().st_size
+
+		# uploading again replaces the content, a shorter file leaves nothing of the old one behind
+		entry, err = await s.nfs.upload_file(s.dir.handle, 'up.bin', io.BytesIO(b'short'))
+		assert err is None
+		data, err = await s.nfs.read(entry.handle)
+		assert err is None
+		assert data == b'short'
+		entry, err = await s.nfs.upload_file(s.dir.handle, 'up.bin', io.BytesIO(b'nope'), exclusive = True)
+		assert entry is False
+		assert err.status == nfsstat4.NFS4ERR_EXIST
+
+async def test_set_credential(factory):
+	async with Scratch(factory) as s:
+		_, err = await s.nfs.setattr(s.dir.handle, mode = 0o777)
+		assert err is None
+		s.nfs.set_credential(AUTH_SYS(uid = 1000, gid = 1000))
+		entry, err = await s.nfs.create(s.dir.handle, 'user.txt', mode = 0o600)
+		assert err is None
+		attrs, err = await s.nfs.getattr(entry.handle)
+		assert err is None
+		assert (attrs.uid, attrs.gid) == (1000, 1000)
+		s.nfs.set_credential(AUTH_SYS(uid = 1001, gid = 1001))
+		data, err = await s.nfs.read(entry.handle)
+		assert data is False
+		assert err.status == nfsstat4.NFS4ERR_ACCESS
+		s.nfs.set_credential(AUTH_SYS(uid = 0, gid = 0))
+		data, err = await s.nfs.read(entry.handle)
+		assert err is None
+
+async def test_acl(factory, server):
+	user = AUTH_SYS(uid = 1001, gid = 1001)
+	async with Scratch(factory) as s:
+		entry, err = await s.nfs.create(s.dir.handle, 'acl.txt', mode = 0o640)
+		assert err is None
+		_, err = await s.nfs.write(entry.handle, 0, b'guarded by an ACL\n')
+		assert err is None
+		acl, err = await s.nfs.get_acl(entry.handle)
+		assert err is None
+		if server == LAB_SERVERS['ganesha']:
+			# the VFS backend of Ganesha is built without ACL support
+			assert acl is None
+			return
+		# the Linux server makes the ACL up from the mode bits
+		assert [str(ace) for ace in acl] == ['A::OWNER@:rwatTcCy', 'A::GROUP@:rtcy', 'A::EVERYONE@:tcy']
+		data, err = await s.nfs.read(entry.handle, auth = user)
+		assert err.status == nfsstat4.NFS4ERR_ACCESS
+
+		# one more user gets in, text and object form are both accepted
+		_, err = await s.nfs.set_acl(entry.handle, [acl[0], 'A::1001:rtcy', 'A::GROUP@:rtcy', acl[2]])
+		assert err is None
+		acl, err = await s.nfs.get_acl(entry.handle)
+		assert err is None
+		assert nfsace4.from_string('A::1001:rtcy') in acl
+		data, err = await s.nfs.read(entry.handle, auth = user)
+		assert err is None
+		assert data == b'guarded by an ACL\n'
+		data, err = await s.nfs.read(entry.handle, auth = AUTH_SYS(uid = 1002, gid = 1002))
+		assert err.status == nfsstat4.NFS4ERR_ACCESS
+
+		# not the owner: no changing of the ACL
+		_, err = await s.nfs.set_acl(entry.handle, ['A::EVERYONE@:rwatcy'], auth = user)
+		assert err.status in (nfsstat4.NFS4ERR_PERM, nfsstat4.NFS4ERR_ACCESS)
+
+async def test_retry_timeout(factory):
+	# a server that keeps asking us to come back later is not waited for forever
+	from anfs.protocol.nfs4.xdr import Compound
+	async with factory.get_client4() as nfs:
+		nfs.retry_timeout = 1
+		calls = []
+		real_call = nfs.rpc.call
+		async def busy(program, version, procedure, data, credential = None):
+			calls.append(1)
+			res, err = await real_call(program, version, procedure, data, credential)
+			if err is None and len(calls) <= 100:
+				# status of the COMPOUND: NFS4ERR_DELAY
+				res = nfsstat4.NFS4ERR_DELAY.to_bytes(4, 'big') + res[4:]
+			return res, err
+		nfs.rpc.call = busy
+		with pytest.raises(NFS4Error) as e:
+			await nfs.compound(Compound(nfs.minorversion).putrootfh().getfh())
+		assert e.value.status == nfsstat4.NFS4ERR_DELAY
+		assert 3 <= len(calls) <= 6
+		# and when the server is done with it the call goes through
+		nfs.retry_timeout = 30
+		calls[:] = [1] * 97
+		res = await nfs.compound(Compound(nfs.minorversion).putrootfh().getfh())
+		assert len(calls) == 101

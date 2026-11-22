@@ -68,6 +68,92 @@ def unpack_fsid4(unpacker):
 def unpack_specdata4(unpacker):
 	return (unpacker.unpack_uint(), unpacker.unpack_uint())
 
+##### nfsace4
+ACE4_TYPES = {0 : 'A', 1 : 'D', 2 : 'U', 3 : 'L'}
+ACE4_FLAGS = [(0x01, 'f'), (0x02, 'd'), (0x04, 'n'), (0x08, 'i'), (0x10, 'S'), (0x20, 'F'), (0x40, 'g')]
+ACE4_MASKS = [
+	(0x00000001, 'r'), (0x00000002, 'w'), (0x00000004, 'a'), (0x00000020, 'x'), (0x00010000, 'd'), (0x00000040, 'D'),
+	(0x00000080, 't'), (0x00000100, 'T'), (0x00000008, 'n'), (0x00000010, 'N'), (0x00020000, 'c'), (0x00040000, 'C'),
+	(0x00080000, 'o'), (0x00100000, 'y'),
+]
+ACE4_IDENTIFIER_GROUP = 0x40
+
+class nfsace4:
+	"""
+	One entry of an NFSv4 ACL. The text form is the one nfs4_getfacl prints: type:flags:who:permissions
+
+	type         A allow, D deny, U audit, L alarm
+	flags        f file inherit, d directory inherit, n no propagate, i inherit only, g 'who' is a group
+	who          OWNER@, GROUP@, EVERYONE@, or a user / group like the owner of a file: name@domain or a numeric id
+	permissions  r read / list, w write / create file, a append / create directory, x execute / enter,
+	             d delete, D delete child, t read attributes, T write attributes, n read named attributes,
+	             N write named attributes, c read ACL, C write ACL, o change owner, y synchronize
+	"""
+	def __init__(self, acetype = 0, flag = 0, access_mask = 0, who = 'EVERYONE@'):
+		self.type = acetype
+		self.flag = flag
+		self.access_mask = access_mask
+		self.who = who
+
+	def pack(self, packer):
+		packer.pack_uint(self.type)
+		packer.pack_uint(self.flag)
+		packer.pack_uint(self.access_mask)
+		packer.pack_opaque(str(self.who).encode('utf-8'))
+
+	@staticmethod
+	def unpack(unpacker):
+		return nfsace4(unpacker.unpack_uint(), unpacker.unpack_uint(), unpacker.unpack_uint(), unpack_utf8(unpacker))
+
+	@staticmethod
+	def from_string(line):
+		parts = line.strip().split(':')
+		if len(parts) < 4:
+			raise ValueError('Not an ACE: "%s", the format is type:flags:who:permissions eg. A::1000:rx' % line)
+		# the name in the middle may have colons in it
+		acetype, flags, who, perms = parts[0], parts[1], ':'.join(parts[2:-1]), parts[-1]
+		ace = nfsace4(who = who)
+		for value, letter in ACE4_TYPES.items():
+			if letter == acetype.upper():
+				ace.type = value
+				break
+		else:
+			raise ValueError('Unknown ACE type "%s"' % acetype)
+		for letters, table, name in [(flags, ACE4_FLAGS, 'flag'), (perms, ACE4_MASKS, 'permission')]:
+			value = 0
+			for letter in letters:
+				for bit, bitletter in table:
+					if bitletter == letter:
+						value |= bit
+						break
+				else:
+					raise ValueError('Unknown ACE %s "%s"' % (name, letter))
+			if name == 'flag':
+				ace.flag = value
+			else:
+				ace.access_mask = value
+		return ace
+
+	def is_group(self):
+		return bool(self.flag & ACE4_IDENTIFIER_GROUP)
+
+	def to_dict(self):
+		return {'type' : self.type, 'flag' : self.flag, 'access_mask' : self.access_mask, 'who' : self.who}
+
+	def __eq__(self, other):
+		return isinstance(other, nfsace4) and self.to_dict() == other.to_dict()
+
+	def __str__(self):
+		flags = ''.join(letter for bit, letter in ACE4_FLAGS if self.flag & bit)
+		perms = ''.join(letter for bit, letter in ACE4_MASKS if self.access_mask & bit)
+		return '%s:%s:%s:%s' % (ACE4_TYPES.get(self.type, self.type), flags, self.who, perms)
+
+	def __repr__(self):
+		return 'nfsace4(%s)' % self
+
+def unpack_acl(unpacker):
+	return [nfsace4.unpack(unpacker) for _ in range(unpacker.unpack_uint())]
+
 def unpack_utf8(unpacker):
 	return unpacker.unpack_opaque().decode('utf-8', errors = 'replace')
 
@@ -86,6 +172,8 @@ FATTR4_DECODERS = {
 	FATTR4_UNIQUE_HANDLES : ('unique_handles', Unpacker.unpack_bool),
 	FATTR4_LEASE_TIME : ('lease_time', Unpacker.unpack_uint),
 	FATTR4_RDATTR_ERROR : ('rdattr_error', Unpacker.unpack_uint),
+	FATTR4_ACL : ('acl', unpack_acl),
+	FATTR4_ACLSUPPORT : ('aclsupport', Unpacker.unpack_uint),
 	FATTR4_FILEHANDLE : ('filehandle', Unpacker.unpack_opaque),
 	FATTR4_FILEID : ('fileid', Unpacker.unpack_uhyper),
 	FATTR4_MAXREAD : ('maxread', Unpacker.unpack_uhyper),
@@ -123,16 +211,23 @@ def unpack_fattr4(unpacker):
 		attrs[name] = decoder(au)
 	return attrs
 
-def pack_fattr4(packer, mode = None, size = None, owner = None, owner_group = None):
+def pack_fattr4(packer, mode = None, size = None, owner = None, owner_group = None, acl = None):
 	"""
 	Packs the settable attributes, the ones left on None are not sent.
 	owner and owner_group are strings, either "user@domain" or a numeric id as string.
+	acl is a list of nfsace4.
 	"""
 	present = []
 	ap = Packer()
+	# the values follow each other in the order of the attribute numbers
 	if size is not None:
 		present.append(FATTR4_SIZE)
 		ap.pack_uhyper(size)
+	if acl is not None:
+		present.append(FATTR4_ACL)
+		ap.pack_uint(len(acl))
+		for ace in acl:
+			ace.pack(ap)
 	if mode is not None:
 		present.append(FATTR4_MODE)
 		ap.pack_uint(mode)

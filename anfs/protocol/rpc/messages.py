@@ -325,3 +325,7 @@ class AUTH_SYS(opaque_auth):
         params = authsys_params(stamp = stamp, machinename = machinename, uid = uid, gid = gid, gids = gids)
         self.flavor = auth_flavor.AUTH_SYS
         self.body = params.to_bytes()
+
+    def get_params(self):
+        """The uid, gid, gids and machinename we present"""
+        return authsys_params.from_bytes(self.body)

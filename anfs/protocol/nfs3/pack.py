@@ -1972,5 +1972,10 @@ def file_mode_to_string(ftype, mode):
 		shifted_mode = mode >> (6 - i*3)
 		permissions += 'r' if shifted_mode & 0o4 else '-'
 		permissions += 'w' if shifted_mode & 0o2 else '-'
-		permissions += 'x' if shifted_mode & 0o1 else '-'
+		# setuid, setgid and sticky take the place of the execute bit
+		special = mode & (0o4000 >> i)
+		if shifted_mode & 0o1:
+			permissions += ('t' if i == 2 else 's') if special else 'x'
+		else:
+			permissions += ('T' if i == 2 else 'S') if special else '-'
 	return type_char + permissions

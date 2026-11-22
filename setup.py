@@ -33,7 +33,7 @@ setup(
 	zip_safe = False,
 	#
 	# license="LICENSE.txt",
-	description="Asynchronous NFSv3 protocol implementation",
+	description="Asynchronous NFSv3 and NFSv4 client implementation",
 
 	# long_description=open("README.txt").read(),
 	python_requires='>=3.7',

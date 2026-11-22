@@ -17,17 +17,26 @@ from anfs.protocol.nfs3.messages import (NFS3_PROCEDURE_NULL, NFS3_PROCEDURE_GET
 					NFS3_PROCEDURE_REMOVE, NFS3_PROCEDURE_RMDIR, NFS3_PROCEDURE_RENAME, NFS3_PROCEDURE_LINK,
 					NFS3_PROCEDURE_READDIR, NFS3_PROCEDURE_READDIRPLUS, NFS3_PROCEDURE_FSSTAT, NFS3_PROCEDURE_FSINFO,
 					NFS3_PROCEDURE_PATHCONF, NFS3_PROCEDURE_COMMIT, NFS_PROGRAM, NFS_V3, NF3BLK, NF3CHR, NF3FIFO,
-					NF3SOCK, time_how, DONT_CHANGE, SET_TO_CLIENT_TIME, SET_TO_SERVER_TIME, NFS3_OK)
+					NF3SOCK, time_how, DONT_CHANGE, SET_TO_CLIENT_TIME, SET_TO_SERVER_TIME, NFS3_OK,
+					NFSSTAT3, UNCHECKED, GUARDED, FILE_SYNC)
 
 from anfs.protocol.nfs3 import logger
 from anfs.protocol.rpc.messages import AUTH_SYS
 
 class NFSAccessError(Exception):
-	pass
+	"""The server refused the call, 'status' is the NFS3ERR_* code"""
+	def __init__(self, status):
+		self.status = status
+		super().__init__(NFSSTAT3.get(status, status))
 
 # Over UDP the whole reply must fit in one datagram, servers are free to return
 # as much data as it was asked for and the oversized reply is then lost.
 NFS3_UDP_MAX_READ = 32768
+# Same for the requests, a WRITE must fit in one datagram with its headers
+NFS3_UDP_MAX_WRITE = 32768
+# IO size when the server does not tell its limits
+NFS3_IO_DEFAULT = 32768
+NFS3_IO_MAX = 1024 * 1024
 
 
 class RawDirEntry:
@@ -237,6 +246,7 @@ class NFSv3Client(NFSv3RawMixin):
 		self.__handle_reverse_map = {
 			root_handle : 0
 		}
+		self.__io_limits = None
 
 	async def __aenter__(self):
 		_, err = await self.connect()
@@ -298,6 +308,15 @@ class NFSv3Client(NFSv3RawMixin):
 			return AUTH_SYS(uid = uid, gid = gid)
 		return None
 
+	def set_credential(self, credential):
+		"""
+		Replaces the credential used for the calls from now on. With AUTH_SYS this
+		is all it takes to become another user.
+		"""
+		self.credential = credential
+		if self.rpc is not None:
+			self.rpc.credential = credential
+
 	async def nfs_request(self, procedure, args, credential = None):
 		return await self.rpc.call(NFS_PROGRAM, NFS_V3, procedure, args, credential)
 		
@@ -355,11 +374,11 @@ class NFSv3Client(NFSv3RawMixin):
 		except Exception as e:
 			return False, e
 
-	# TODO: Implement setattr
 	async def setattr(self, file_handle, mode=None, uid=None, gid=None, size=None,
-				atime_flag=SET_TO_SERVER_TIME, atime_s=None, atime_us=None,
-				mtime_flag=SET_TO_SERVER_TIME, mtime_s=None, mtime_us=None,
+				atime_flag=DONT_CHANGE, atime_s=0, atime_us=0,
+				mtime_flag=DONT_CHANGE, mtime_s=0, mtime_us=0,
 				check=False, obj_ctime=None, auth=None):
+		"""Changes the attributes that are not None, the times are left alone unless their flag says otherwise"""
 		try:
 			file_handle = self.__handles[file_handle]
 			packer = nfs_pro_v3Packer()
@@ -368,13 +387,16 @@ class NFSv3Client(NFSv3RawMixin):
 												new_attributes=attrs,
 												guard=sattrguard3(check=check, ctime=obj_ctime)))
 
-			logger.debug("NFSv3 procedure %d: GETATTR on %s" % (NFS3_PROCEDURE_SETATTR, self.host))
+			logger.debug("NFSv3 procedure %d: SETATTR on %s" % (NFS3_PROCEDURE_SETATTR, self.host))
 			data, err = await self.nfs_request(NFS3_PROCEDURE_SETATTR, packer.get_buffer(), auth)
 			if err is not None:
 				raise err
 
 			unpacker = nfs_pro_v3Unpacker(data)
-			return unpacker.unpack_setattr3res(), None
+			response = unpacker.unpack_setattr3res()
+			if response['status'] != 0:
+				raise NFSAccessError(response['status'])
+			return response, None
 		except Exception as e:
 			return False, e
 
@@ -488,7 +510,72 @@ class NFSv3Client(NFSv3RawMixin):
 				raise err
 			
 			unpacker = nfs_pro_v3Unpacker(res)
-			return unpacker.unpack_write3res(), None
+			response = unpacker.unpack_write3res()
+			if response['status'] != 0:
+				raise NFSAccessError(response['status'])
+			return response, None
+		except Exception as e:
+			return False, e
+
+	async def max_write_size(self, auth=None):
+		"""The most data the server takes in one WRITE"""
+		if self.__io_limits is None:
+			limits = {'wtmax' : NFS3_IO_DEFAULT}
+			res, err = await self.fsinfo(0, auth)
+			if err is None and res['status'] == 0 and res['resok']['wtmax'] > 0:
+				limits['wtmax'] = min(res['resok']['wtmax'], NFS3_IO_MAX)
+			self.__io_limits = limits
+		if self.target.is_udp() is True:
+			return min(self.__io_limits['wtmax'], NFS3_UDP_MAX_WRITE)
+		return self.__io_limits['wtmax']
+
+	async def write_file(self, file_handle, content, offset=0, stable_how=FILE_SYNC, auth=None):
+		"""Writes all of content in as many WRITE calls as it takes, returns the number of bytes written"""
+		try:
+			chunk = await self.max_write_size(auth)
+			total = 0
+			while total < len(content):
+				data = content[total : total + chunk]
+				res, err = await self.write(file_handle, offset + total, len(data), data, stable_how, auth)
+				if err is not None:
+					raise err
+				if res['resok']['count'] == 0:
+					raise Exception('Server wrote 0 bytes')
+				# the server is free to write less than it was given
+				total += res['resok']['count']
+			return total, None
+		except Exception as e:
+			return False, e
+
+	async def upload_file(self, dir_handle, file_name, local_path, mode=0o644, exclusive=False, progress_cb=None, auth=None):
+		"""
+		Creates file_name in the directory and fills it with the contents of the local file
+		(a path or a file object opened for binary reading). An existing file is overwritten
+		unless exclusive is set. progress_cb is called with the size of each chunk written.
+		"""
+		try:
+			entry, err = await self.create(dir_handle, file_name, GUARDED if exclusive is True else UNCHECKED, mode=mode, size=0, auth=auth)
+			if err is not None:
+				raise err
+			chunk = await self.max_write_size(auth)
+			f = open(local_path, 'rb') if isinstance(local_path, (str, Path)) else local_path
+			try:
+				offset = 0
+				while True:
+					data = f.read(chunk)
+					if len(data) == 0:
+						break
+					_, err = await self.write_file(entry.handle, data, offset, auth=auth)
+					if err is not None:
+						raise err
+					offset += len(data)
+					if progress_cb is not None:
+						progress_cb(len(data))
+			finally:
+				if f is not local_path:
+					f.close()
+			entry.size = offset
+			return entry, None
 		except Exception as e:
 			return False, e
 
@@ -565,7 +652,7 @@ class NFSv3Client(NFSv3RawMixin):
 			unpacker = nfs_pro_v3Unpacker(res)
 			result = unpacker.unpack_symlink3res()
 			if result['status'] != 0:
-				raise NFSAccessError(result.status)
+				raise NFSAccessError(result['status'])
 			return True, None
 		
 		except Exception as e:
@@ -598,7 +685,10 @@ class NFSv3Client(NFSv3RawMixin):
 				raise err
 
 			unpacker = nfs_pro_v3Unpacker(res)
-			return unpacker.unpack_mknod3res(), None
+			response = unpacker.unpack_mknod3res()
+			if response['status'] != 0:
+				raise NFSAccessError(response['status'])
+			return response, None
 		except Exception as e:
 			return False, e
 
@@ -681,42 +771,51 @@ class NFSv3Client(NFSv3RawMixin):
 				raise err
 			
 			unpacker = nfs_pro_v3Unpacker(res)
-			return unpacker.unpack_link3res(), None
+			response = unpacker.unpack_link3res()
+			if response['status'] != 0:
+				raise NFSAccessError(response['status'])
+			return response, None
 		except Exception as e:
 			return False, e
 
-	async def readdir(self, dir_handle, cookie=0, cookie_verf='0', count=4096, auth=None):
+	async def readdir(self, dir_handle, cookie=0, cookie_verf=b'\x00', count=4096, auth=None):
+		"""
+		Yields the entries of a directory. Plain READDIR gives names and file ids only:
+		the entries have no attributes and no handle, lookup() gets those.
+		Use readdirplus() to have everything in one go.
+		"""
 		try:
-			dir_handle = self.__handles[dir_handle]
-			packer = nfs_pro_v3Packer()
-			packer.pack_readdir3args(readdir3args(dir=nfs_fh3(dir_handle),
-												cookie=cookie,
-												cookieverf=cookie_verf.encode(),
-												count=count))
+			real_dir_handle = self.__handles[dir_handle]
+			if isinstance(cookie_verf, str):
+				cookie_verf = cookie_verf.encode()
+			while True:
+				packer = nfs_pro_v3Packer()
+				packer.pack_readdir3args(readdir3args(dir=nfs_fh3(real_dir_handle),
+													cookie=cookie,
+													cookieverf=cookie_verf,
+													count=count))
 
-			logger.debug("NFSv3 procedure %d: READDIR on %s" % (NFS3_PROCEDURE_READDIR, self.host))
-			res, err =  await self.nfs_request(NFS3_PROCEDURE_READDIR, packer.get_buffer(), auth)
-			if err is not None:
-				raise err
-			
-			unpacker = nfs_pro_v3Unpacker(res)
-			fl = unpacker.unpack_readdir3res(data_format='')
-			if fl.status != 0:
-				raise NFSAccessError(fl.status)
-			
-			last_cookie = 0
-			for entry in nextiter(fl.resok.reply.entries):
-				last_cookie = entry['cookie']
-				entry, realhandle = NFSFileEntry.from_dict(entry, encoding=self.encoding)
-				entry.handle = self.register_handle(realhandle, entry.name, dir_handle)
+				logger.debug("NFSv3 procedure %d: READDIR on %s" % (NFS3_PROCEDURE_READDIR, self.host))
+				res, err =  await self.nfs_request(NFS3_PROCEDURE_READDIR, packer.get_buffer(), auth)
+				if err is not None:
+					raise err
 
-				yield entry, None
-			
-			if fl.resok.reply.eof is False:
-				async for entry, err in self.readdirplus(dir_handle, last_cookie, cookie_verf, count):
-					entry, realhandle = NFSFileEntry.from_dict(entry, encoding=self.encoding)
-					entry.handle = self.register_handle(realhandle, entry.name, dir_handle)
-					yield entry, err
+				unpacker = nfs_pro_v3Unpacker(res)
+				fl = unpacker.unpack_readdir3res(data_format='')
+				if fl.status != 0:
+					raise NFSAccessError(fl.status)
+
+				if len(fl.resok.reply.entries) == 0:
+					break
+				for entry in nextiter(fl.resok.reply.entries):
+					cookie = entry['cookie']
+					entry, _ = NFSFileEntry.from_dict(entry, encoding=self.encoding)
+					yield entry, None
+
+				if fl.resok.reply.eof is True:
+					break
+				# the next page is asked with the verifier the server gave for this one
+				cookie_verf = fl.resok.cookieverf
 
 		except Exception as e:
 			yield False, e
@@ -771,6 +870,8 @@ class NFSv3Client(NFSv3RawMixin):
 			
 			last_cookie = 0
 			last_cookie_verf = fl.resok.cookieverf
+			if len(fl.resok.reply.entries) == 0:
+				return
 			for entry in nextiter(fl.resok.reply.entries):
 				last_cookie = entry['cookie']
 				entry, realhandle = NFSFileEntry.from_dict(entry, encoding=self.encoding)
@@ -841,10 +942,17 @@ class NFSv3Client(NFSv3RawMixin):
 			yield None, None, None, e
 				
 				
-	async def download_file(self, file_handle, local_path, chunk_size = 4096, max_size = None, uid = 0, gid = 0):
+	async def download_file(self, file_handle, local_path, chunk_size = 65536, max_size = None, uid = None, gid = None, progress_cb = None):
+		"""
+		Downloads a file to local_path (if that is a directory the file keeps its name).
+		With uid and gid the file is read as that user (AUTH_SYS only), otherwise as ourselves.
+		"""
 		try:
 			done = False
 			bytes_read = 0
+			auth = None
+			if uid is not None:
+				auth = self.owner_auth(uid, gid if gid is not None else 0)
 
 			local_path = Path(local_path)
 			if local_path.is_dir():
@@ -852,7 +960,7 @@ class NFSv3Client(NFSv3RawMixin):
 			
 			with open(local_path, 'wb') as f:
 				while not done:
-					data, err = await self.read(file_handle, bytes_read, chunk_size, auth = self.owner_auth(uid, gid))
+					data, err = await self.read(file_handle, bytes_read, chunk_size, auth = auth)
 
 					if err is not None:
 						raise err
@@ -860,8 +968,11 @@ class NFSv3Client(NFSv3RawMixin):
 					f.write(data)
 
 					bytes_read += len(data)
+					if progress_cb is not None:
+						progress_cb(len(data))
 					
-					if len(data) <= chunk_size or (max_size is not None and bytes_read >= max_size):
+					# a read at the end of the file returns nothing
+					if len(data) == 0 or (max_size is not None and bytes_read >= max_size):
 						done = True
 			
 			return local_path, None
@@ -971,7 +1082,10 @@ class NFSv3Client(NFSv3RawMixin):
 				raise err
 
 			unpacker = nfs_pro_v3Unpacker(res)
-			return unpacker.unpack_commit3res(), None
+			response = unpacker.unpack_commit3res()
+			if response['status'] != 0:
+				raise NFSAccessError(response['status'])
+			return response, None
 		except Exception as e:
 			return False, e
 

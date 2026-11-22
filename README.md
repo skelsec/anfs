@@ -7,7 +7,7 @@ For notifications on new builds/releases and other info, hop on to our [Discord]
 
 
 # anfs
-Asynchronous NFSv3 and NFSv4 (4.1, 4.2) client in pure Python
+Asynchronous NFSv3 and NFSv4 (4.0, 4.1, 4.2) client in pure Python
 
 ## :triangular_flag_on_post: Runs in the browser
 
@@ -27,7 +27,7 @@ This is a "security feature" of NFS whereby the server checks if the client is c
 Using lower ports is only allowed if you run the client as a high privileged user, or if you have capabilities set on linux systems.
 
 ## NFSv4
-`anfsclient 'nfs://10.0.0.1/?version=4'` - uses NFSv4.1, `version=4.2` is also available.  
+`anfsclient 'nfs://10.0.0.1/?version=4'` - uses NFSv4.1, `version=4.0` and `version=4.2` are also available.  
 NFSv4 needs only the NFS port (2049 unless set otherwise), no portmapper and no mount service. There are no mountpoints either:
 the client starts in the root directory of the server and all exports are somewhere below it, `ls` and `cd` gets you there.  
 The same export can behave differently over the two protocol versions, it is worth checking both.
@@ -37,7 +37,7 @@ Everything is set in the query part of the URL, parameters can be combined.
 
 | Parameter | Meaning | Default |
 |---|---|---|
-| `version` | NFS version: `3`, `4` (same as `4.1`), `4.2` | `3` |
+| `version` | NFS version: `3`, `4.0`, `4` (same as `4.1`), `4.2` | `3` |
 | port of the URL / `nfsport` | port of the NFS service | asks the portmapper (NFSv4: 2049) |
 | `mountport` | port of the mount service (NFSv3 only) | asks the portmapper |
 | `portmapport` | port of the portmapper (NFSv3 only) | 111 |

@@ -17,6 +17,9 @@ from anfs.protocol.nfs4.xdr import Compound, stateid4, STATEID_ANONYMOUS, FATTR4
 
 # The room left for the RPC and COMPOUND headers when the IO size is derived from the size limits of the session
 NFS4_IO_OVERHEAD = 1024
+# NFSv4.0 IO size: what is used when the server does not tell its limits, and what is never exceeded
+NFS4_IO_DEFAULT = 65536
+NFS4_IO_MAX = 1024 * 1024
 
 # The session is gone on the server (eg. the lease ran out while we were idle), a new one is needed
 NFS4_SESSION_LOST = (
@@ -73,13 +76,16 @@ def entry_from_attrs(attrs, name = None):
 
 class NFSv4Client:
 	"""
-	NFSv4.1 / NFSv4.2 client.
+	NFSv4.0 / NFSv4.1 / NFSv4.2 client.
 
 	There is no mount protocol in NFSv4: the server has one namespace, all exports are below
 	its root. Handle 0 is the root of the server, everything else is reached by lookups.
 
 	Files are read and written with the anonymous stateid by default, no open state
 	is kept on the server.
+
+	NFSv4.1 and above run everything in a session. NFSv4.0 has none: its operations are
+	sent as they are, and the client registers itself (SETCLIENTID) only when a file is opened.
 	"""
 	def __init__(self, target, credential = None, encoding = 'utf-8', minorversion = 1):
 		self.target = target
@@ -99,6 +105,10 @@ class NFSv4Client:
 		self.__session_generation = 0
 		self.__session_lock = asyncio.Lock()
 		self.__open_owner = b'anfs-' + os.urandom(4).hex().encode()
+		# NFSv4.0: IO size limits of the server and the next seqid of the open-owner behind each open stateid
+		self.__io_limits = None
+		self.__open_seqids = {}
+		self.__clientid_lock = asyncio.Lock()
 
 		self.__handle_id = 1
 		self.__handles = {}
@@ -163,10 +173,13 @@ class NFSv4Client:
 			if err is not None:
 				raise err
 			self.host = self.target.get_hostname_or_ip()
-			await self.__establish_session(0)
+			if self.minorversion > 0:
+				await self.__establish_session(0)
 
 			res = await self.compound(Compound(self.minorversion).putrootfh().getfh())
 			self.root_handle = res[1]
+			if self.minorversion == 0:
+				await self.__get_io_limits()
 			self.__handles[0] = self.root_handle
 			self.__handle_name_map[self.root_handle] = '/'
 			self.__handle_reverse_map[self.root_handle] = 0
@@ -179,7 +192,7 @@ class NFSv4Client:
 		if self.rpc is None:
 			return
 		try:
-			if self.sessionid is not None:
+			if self.minorversion > 0 and self.sessionid is not None:
 				await self.__call(Compound(self.minorversion).destroy_session(self.sessionid))
 				await self.__call(Compound(self.minorversion).destroy_clientid(self.clientid))
 		except Exception:
@@ -235,11 +248,45 @@ class NFSv4Client:
 			if e.status != nfsstat4.NFS4ERR_COMPLETE_ALREADY:
 				raise
 
+	async def __get_io_limits(self):
+		"""NFSv4.0: there is no session to tell the size limits, the server has them as attributes"""
+		self.__io_limits = {'maxread' : NFS4_IO_DEFAULT, 'maxwrite' : NFS4_IO_DEFAULT}
+		try:
+			res = await self.compound(Compound(0).putrootfh().getattr([FATTR4_MAXREAD, FATTR4_MAXWRITE]))
+			for name in self.__io_limits:
+				if res[1].get(name):
+					self.__io_limits[name] = min(res[1][name], NFS4_IO_MAX)
+		except NFS4Error:
+			pass
+
+	async def __setclientid(self, auth = None):
+		"""NFSv4.0: registers the client, needed only for opening files"""
+		async with self.__clientid_lock:
+			res = await self.compound(Compound(0).setclientid(os.urandom(NFS4_VERIFIER_SIZE), b'anfs-' + os.urandom(8).hex().encode()), auth)
+			await self.compound(Compound(0).setclientid_confirm(res[0]['clientid'], res[0]['confirm']), auth)
+			self.clientid = res[0]['clientid']
+
+	async def __compound40(self, compound, auth = None):
+		for attempt in range(NFS4_RETRY_COUNT):
+			status, results = await self.__call(compound, auth = auth)
+			if status == 0:
+				# same layout as with a session, where the result of the SEQUENCE is cut off
+				return [r[2] for r in results]
+			failed = results[-1] if len(results) > 0 else (None, status, None)
+			if status in NFS4_RETRY_LATER:
+				await asyncio.sleep(min(0.1 * (2 ** attempt), 5))
+				continue
+			break
+		raise NFS4Error(status, failed[0])
+
 	async def compound(self, compound, auth = None, _recover = True):
 		"""
-		Runs the operations in 'compound' on a slot of the session and returns the list
-		of their results. Raises NFS4Error if one of the operations failed.
+		Runs the operations in 'compound' (on a slot of the session, if the protocol version
+		has sessions) and returns the list of their results. Raises NFS4Error if one of the
+		operations failed.
 		"""
+		if self.minorversion == 0:
+			return await self.__compound40(compound, auth)
 		for attempt in range(NFS4_RETRY_COUNT):
 			generation = self.__session_generation
 			sessionid = self.sessionid
@@ -288,9 +335,13 @@ class NFSv4Client:
 		return await self.rpc.call(NFS_PROGRAM, NFS_V4, NFSPROC4_NULL, b'')
 
 	def max_read_size(self):
+		if self.minorversion == 0:
+			return self.__io_limits['maxread']
 		return max(4096, self.fore_chan_attrs['maxresponsesize'] - NFS4_IO_OVERHEAD)
 
 	def max_write_size(self):
+		if self.minorversion == 0:
+			return self.__io_limits['maxwrite']
 		return max(4096, self.fore_chan_attrs['maxrequestsize'] - NFS4_IO_OVERHEAD)
 
 	def __entry(self, fh, attrs, name, parent_handle):
@@ -347,6 +398,27 @@ class NFSv4Client:
 			logger.debug('NFSv4 ACCESS on %s' % self.host)
 			res = await self.compound(Compound(self.minorversion).putfh(fh).access(access_option), auth)
 			return res[1]['access'], None
+		except Exception as e:
+			return False, e
+
+	async def secinfo(self, file_handle, name = None, auth = None):
+		"""
+		The security flavors the server accepts for the handle, or for 'name' in the directory
+		of the handle. Returns a list of dictionaries, 'flavor' is the RPC auth flavor,
+		for RPCSEC_GSS (6) the mechanism 'oid' and the 'service' is also there.
+		"""
+		try:
+			fh = self.__handles[file_handle]
+			logger.debug('NFSv4 SECINFO on %s' % self.host)
+			c = Compound(self.minorversion).putfh(fh)
+			if name is None:
+				if self.minorversion == 0:
+					raise NotImplementedError('NFSv4.0 can ask the security flavors only by name')
+				c.secinfo_no_name()
+			else:
+				c.secinfo(self.__encode(name))
+			res = await self.compound(c, auth)
+			return res[1], None
 		except Exception as e:
 			return False, e
 
@@ -419,6 +491,8 @@ class NFSv4Client:
 			share = OPEN4_SHARE_ACCESS_BOTH if write is True or create is True else OPEN4_SHARE_ACCESS_READ
 			createmode = GUARDED4 if exclusive is True else UNCHECKED4
 			logger.debug('NFSv4 OPEN on %s' % self.host)
+			if self.minorversion == 0:
+				return await self.__open40(dir_fh, file_name, share, create, createmode, mode, auth), None
 			c = Compound(self.minorversion).putfh(dir_fh)
 			c.open(self.clientid, self.__open_owner, share, self.__encode(file_name), create, createmode, mode = mode)
 			res = await self.compound(c.getfh().getattr(), auth)
@@ -426,11 +500,41 @@ class NFSv4Client:
 		except Exception as e:
 			return False, e
 
+	async def __open40(self, dir_fh, file_name, share, create, createmode, mode, auth):
+		"""
+		NFSv4.0: the opens of an open-owner are ordered by a sequence number. Every open gets
+		an owner of its own here, so the opens do not have to wait for each other.
+		"""
+		for attempt in range(2):
+			if self.clientid is None:
+				await self.__setclientid(auth)
+			owner = b'anfs-' + os.urandom(8).hex().encode()
+			c = Compound(0).putfh(dir_fh)
+			c.open(self.clientid, owner, share, self.__encode(file_name), create, createmode, seqid = 0, mode = mode)
+			try:
+				res = await self.compound(c.getfh().getattr(), auth)
+				break
+			except NFS4Error as e:
+				# the registration is forgotten when nothing is open for the time of the lease
+				if attempt == 0 and e.status in (nfsstat4.NFS4ERR_STALE_CLIENTID, nfsstat4.NFS4ERR_EXPIRED):
+					self.clientid = None
+					continue
+				raise
+		stateid = res[1]['stateid']
+		seqid = 1
+		if res[1]['rflags'] & OPEN4_RESULT_CONFIRM:
+			confirm = await self.compound(Compound(0).putfh(res[2]).open_confirm(stateid, seqid), auth)
+			stateid = confirm[1]
+			seqid += 1
+		self.__open_seqids[stateid.other] = seqid
+		return self.__entry(res[2], res[3], file_name, dir_fh), stateid
+
 	async def close(self, file_handle, stateid, auth = None):
 		try:
 			fh = self.__handles[file_handle]
 			logger.debug('NFSv4 CLOSE on %s' % self.host)
-			await self.compound(Compound(self.minorversion).putfh(fh).close(stateid), auth)
+			seqid = self.__open_seqids.pop(stateid.other, 0)
+			await self.compound(Compound(self.minorversion).putfh(fh).close(stateid, seqid), auth)
 			return True, None
 		except Exception as e:
 			return False, e

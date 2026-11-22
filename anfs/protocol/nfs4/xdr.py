@@ -314,6 +314,28 @@ class Compound:
 			'back_chan_attrs' : unpack_channel_attrs4(u),
 		}
 
+	##### NFSv4.0 client registration, sessions took the place of these
+	def setclientid(self, verifier, ownerid):
+		p = self.__add(OP.SETCLIENTID, lambda u: {'clientid' : u.unpack_uhyper(), 'confirm' : u.unpack_fopaque(NFS4_VERIFIER_SIZE)})
+		p.pack_fopaque(NFS4_VERIFIER_SIZE, verifier)
+		p.pack_opaque(ownerid)
+		# the callback address: there is none, the server can not give us delegations then
+		p.pack_uint(NFS4_CALLBACK_PROGRAM)
+		p.pack_opaque(b'tcp')
+		p.pack_opaque(b'0.0.0.0.0.0')
+		p.pack_uint(0) # callback_ident
+		return self
+
+	def setclientid_confirm(self, clientid, verifier):
+		p = self.__add(OP.SETCLIENTID_CONFIRM)
+		p.pack_uhyper(clientid)
+		p.pack_fopaque(NFS4_VERIFIER_SIZE, verifier)
+		return self
+
+	def renew(self, clientid):
+		self.__add(OP.RENEW).pack_uhyper(clientid)
+		return self
+
 	def destroy_session(self, sessionid):
 		self.__add(OP.DESTROY_SESSION).pack_fopaque(NFS4_SESSIONID_SIZE, sessionid)
 		return self
@@ -374,6 +396,29 @@ class Compound:
 	def lookupp(self):
 		self.__add(OP.LOOKUPP)
 		return self
+
+	##### security
+	def secinfo(self, name):
+		"""The security flavors the server accepts for 'name' in the current directory. Consumes the current filehandle."""
+		self.__add(OP.SECINFO, self.__secinfo_res).pack_opaque(name)
+		return self
+
+	def secinfo_no_name(self, style = SECINFO_STYLE4_CURRENT_FH):
+		"""Same for the current filehandle itself (or its parent). Consumes the current filehandle."""
+		self.__add(OP.SECINFO_NO_NAME, self.__secinfo_res).pack_uint(style)
+		return self
+
+	@staticmethod
+	def __secinfo_res(u):
+		res = []
+		for _ in range(u.unpack_uint()):
+			entry = {'flavor' : u.unpack_uint()}
+			if entry['flavor'] == RPCSEC_GSS:
+				entry['oid'] = u.unpack_opaque()
+				entry['qop'] = u.unpack_uint()
+				entry['service'] = u.unpack_uint()
+			res.append(entry)
+		return res
 
 	##### reading
 	def getattr(self, attrs = FATTR4_DEFAULT):
@@ -469,14 +514,16 @@ class Compound:
 		pack_fattr4(p, **attrs)
 		return self
 
-	def open(self, clientid, owner, share_access, name = None, create = False, createmode = UNCHECKED4, **attrs):
+	def open(self, clientid, owner, share_access, name = None, create = False, createmode = UNCHECKED4, seqid = 0, **attrs):
 		"""
 		Opens a file. With a name the current filehandle is the directory the file is in (CLAIM_NULL),
 		without one it is the file itself (CLAIM_FH). The current filehandle becomes the file.
 		"""
 		p = self.__add(OP.OPEN, self.__open_res)
-		p.pack_uint(0) # seqid, not used with sessions
-		p.pack_uint(share_access | OPEN4_SHARE_ACCESS_WANT_NO_DELEG)
+		p.pack_uint(seqid) # not used with sessions
+		if self.minorversion > 0:
+			share_access |= OPEN4_SHARE_ACCESS_WANT_NO_DELEG
+		p.pack_uint(share_access)
 		p.pack_uint(OPEN4_SHARE_DENY_NONE)
 		p.pack_uhyper(clientid)
 		p.pack_opaque(owner)
@@ -503,8 +550,15 @@ class Compound:
 			'delegation' : unpack_open_delegation4(u),
 		}
 
-	def close(self, stateid):
+	def open_confirm(self, stateid, seqid):
+		"""NFSv4.0 only"""
+		p = self.__add(OP.OPEN_CONFIRM, stateid4.unpack)
+		stateid.pack(p)
+		p.pack_uint(seqid)
+		return self
+
+	def close(self, stateid, seqid = 0):
 		p = self.__add(OP.CLOSE, stateid4.unpack)
-		p.pack_uint(0) # seqid, not used with sessions
+		p.pack_uint(seqid) # not used with sessions
 		stateid.pack(p)
 		return self

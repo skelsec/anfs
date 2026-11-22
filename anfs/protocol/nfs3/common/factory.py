@@ -21,7 +21,7 @@ class NFS3ConnectionFactory:
 	def __init__(self, credential:UniCredential = None, target:RPCTarget = None, version = '3'):
 		self.credential = credential
 		self.target = target
-		# NFS protocol version asked for in the URL: 3, 4.1 or 4.2
+		# NFS protocol version asked for in the URL: 3, 4.0, 4.1 or 4.2
 		self.version = NFS3ConnectionFactory.parse_version(version)
 
 	@staticmethod
@@ -44,8 +44,8 @@ class NFS3ConnectionFactory:
 		if version == '4.2':
 			return (4, 2)
 		if version == '4.0':
-			raise Exception('NFSv4.0 is not supported yet, use 4.1 or 4.2')
-		raise Exception('Unknown NFS version "%s", must be one of 3, 4, 4.1, 4.2' % version)
+			return (4, 0)
+		raise Exception('Unknown NFS version "%s", must be one of 3, 4, 4.0, 4.1, 4.2' % version)
 
 	def is_v4(self):
 		return self.version[0] == 4
@@ -68,7 +68,7 @@ class NFS3ConnectionFactory:
 	def get_help(helptype:str = 'url'):
 		if helptype == 'url':
 			return 'Protocol version -query params-:\n' + \
-				'\tversion - str - 3 (default), 4 or 4.1, 4.2\n' + \
+				'\tversion - str - 3 (default), 4.0, 4 or 4.1, 4.2\n' + \
 				'Authentication (AUTH_SYS) related parameters -query params-:\n' + \
 				'\tuid - int - user id to present to the server (default: 0)\n' + \
 				'\tgid - int - group id to present to the server (default: 0)\n' + \

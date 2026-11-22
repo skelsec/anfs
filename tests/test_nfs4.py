@@ -11,7 +11,7 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.timeout(60)]
 
 # Under NFSv4 both lab servers present the exports directly below the root: /srv/exports/rw is /rw
 
-@pytest.fixture(params = ['4.1', '4.2'])
+@pytest.fixture(params = ['4.0', '4.1', '4.2'])
 def factory(request, server):
 	return NFS3ConnectionFactory.from_url('nfs://%s/?version=%s' % (server, request.param))
 
@@ -56,8 +56,12 @@ class Scratch:
 async def test_session(factory):
 	async with factory.get_client4() as nfs:
 		assert nfs.minorversion == factory.version[1]
-		assert len(nfs.sessionid) == 16
-		assert nfs.fore_chan_attrs['maxrequests'] >= 1
+		if nfs.minorversion == 0:
+			# no sessions in NFSv4.0
+			assert nfs.sessionid is None
+		else:
+			assert len(nfs.sessionid) == 16
+			assert nfs.fore_chan_attrs['maxrequests'] >= 1
 		_, err = await nfs.null()
 		assert err is None
 
@@ -308,6 +312,8 @@ async def test_session_recovery(factory):
 	# the next call transparently sets up a new one
 	from anfs.protocol.nfs4.xdr import Compound
 	from anfs.protocol.nfs4.constants import NFS_PROGRAM, NFS_V4, NFSPROC4_COMPOUND
+	if factory.version[1] == 0:
+		pytest.skip('no sessions in NFSv4.0')
 	async with factory.get_client4() as nfs:
 		hello = await path(nfs, '/ro/hello.txt')
 		old = nfs.sessionid
@@ -317,3 +323,18 @@ async def test_session_recovery(factory):
 		assert err is None
 		assert data == b'hello from ro\n'
 		assert nfs.sessionid != old
+
+async def test_nfs40_clientid_expiry(server):
+	# NFSv4.0: the server forgets our registration once the lease is over (15 seconds in the lab)
+	# with nothing open, the next open registers again
+	import asyncio
+	factory = NFS3ConnectionFactory.from_url('nfs://%s/?version=4.0' % server)
+	async with Scratch(factory) as s:
+		_, err = await s.nfs.create(s.dir.handle, 'first')
+		assert err is None
+		clientid = s.nfs.clientid
+		assert clientid is not None
+		await asyncio.sleep(35)
+		_, err = await s.nfs.create(s.dir.handle, 'second')
+		assert err is None
+		assert await s.names() == ['first', 'second']

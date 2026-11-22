@@ -62,6 +62,9 @@ class NFSClientConsole(aiocmd.PromptToolkitCmd):
 	async def do_mounts(self):
 		"""Lists all mountpoints"""
 		
+		if self.mount is None and await self.do_connect() is False:
+			return False
+
 		if len(self.__mounts) == 0:
 			mountres, err = await self.mount.export()
 			if err is not None:
@@ -95,6 +98,9 @@ class NFSClientConsole(aiocmd.PromptToolkitCmd):
 			print('Already using this mountpoint!')
 			return True
 		
+		if self.mount is None and await self.do_connect() is False:
+			return False
+
 		mhandle, err = await self.mount.mount(mountpoint)
 		if err is not None:
 			raise err

@@ -75,22 +75,22 @@ class reject_stat(enum.Enum):
 
 class auth_stat(enum.Enum):
     AUTH_OK      = 0
-    AUTH_BADCRED      = 1,  #/* bad credential (seal broken)   */
-    AUTH_REJECTEDCRED = 2,  #/* client must begin new session  */
-    AUTH_BADVERF      = 3,  #/* bad verifier (seal broken)     */
-    AUTH_REJECTEDVERF = 4,  #/* verifier expired or replayed   */
-    AUTH_TOOWEAK      = 5,  #/* rejected for security reasons  */
+    AUTH_BADCRED      = 1  #/* bad credential (seal broken)   */
+    AUTH_REJECTEDCRED = 2  #/* client must begin new session  */
+    AUTH_BADVERF      = 3  #/* bad verifier (seal broken)     */
+    AUTH_REJECTEDVERF = 4  #/* verifier expired or replayed   */
+    AUTH_TOOWEAK      = 5  #/* rejected for security reasons  */
     #* failed locally*/
-    AUTH_INVALIDRESP  = 6,  #/* bogus response verifier        */
-    AUTH_FAILED       = 7,  #/* reason unknown                 */
+    AUTH_INVALIDRESP  = 6  #/* bogus response verifier        */
+    AUTH_FAILED       = 7  #/* reason unknown                 */
     #/* AUTH_KERB errors; deprecated.  See [RFC2695] */
-    AUTH_KERB_GENERIC = 8,  #/* kerberos generic error */
-    AUTH_TIMEEXPIRE = 9,    #/* time of credential expired */
-    AUTH_TKT_FILE = 10,     #/* problem with ticket file */
-    AUTH_DECODE = 11,       #/* can't decode authenticator */
-    AUTH_NET_ADDR = 12,     #/* wrong net address in ticket */
+    AUTH_KERB_GENERIC = 8  #/* kerberos generic error */
+    AUTH_TIMEEXPIRE = 9    #/* time of credential expired */
+    AUTH_TKT_FILE = 10     #/* problem with ticket file */
+    AUTH_DECODE = 11       #/* can't decode authenticator */
+    AUTH_NET_ADDR = 12     #/* wrong net address in ticket */
     #/* RPCSEC_GSS GSS related errors*/
-    RPCSEC_GSS_CREDPROBLEM = 13, #/* no credentials for user */
+    RPCSEC_GSS_CREDPROBLEM = 13 #/* no credentials for user */
     RPCSEC_GSS_CTXPROBLEM = 14   #/* problem with context */
 
 class rpc_msg:
@@ -215,6 +215,7 @@ class rejected_reply:
     def __init__(self):
         self.stat = None
         self.mismatch_info = None
+        self.auth_stat = None
     
     @staticmethod
     def from_bytes(data: bytes):
@@ -226,12 +227,16 @@ class rejected_reply:
         result.stat = reject_stat(int.from_bytes(buff.read(4), byteorder='big', signed=False))
         if result.stat == reject_stat.RPC_MISMATCH:
             result.mismatch_info = mismatch_info.from_buffer(buff)
+        elif result.stat == reject_stat.AUTH_ERROR:
+            result.auth_stat = auth_stat(int.from_bytes(buff.read(4), byteorder='big', signed=False))
         return result
     
     def to_bytes(self):
-        result = self.stat.to_bytes(4, byteorder='big', signed=False)
+        result = self.stat.value.to_bytes(4, byteorder='big', signed=False)
         if self.stat == reject_stat.RPC_MISMATCH:
             result += self.mismatch_info.to_bytes()
+        elif self.stat == reject_stat.AUTH_ERROR:
+            result += self.auth_stat.value.to_bytes(4, byteorder='big', signed=False)
         return result
 
 class mismatch_info:
@@ -282,10 +287,14 @@ class authsys_params:
     def from_buffer(buff: io.BytesIO):
         result = authsys_params()
         result.stamp = int.from_bytes(buff.read(4), byteorder='big', signed=False)
-        result.machinename = buff.read(255)
+        mnlen = int.from_bytes(buff.read(4), byteorder='big', signed=False)
+        result.machinename = buff.read(mnlen).decode('utf-8')
+        buff.read((4 - mnlen % 4) % 4)
         result.uid = int.from_bytes(buff.read(4), byteorder='big', signed=False)
         result.gid = int.from_bytes(buff.read(4), byteorder='big', signed=False)
-        result.gids = buff.read(16*4)
+        result.gids = []
+        for _ in range(int.from_bytes(buff.read(4), byteorder='big', signed=False)):
+            result.gids.append(int.from_bytes(buff.read(4), byteorder='big', signed=False))
         return result
     
     def to_bytes(self):

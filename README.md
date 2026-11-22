@@ -26,6 +26,31 @@ Basic usage:
 This is a "security feature" of NFS whereby the server checks if the client is connecting from a lower port.  
 Using lower ports is only allowed if you run the client as a high privileged user, or if you have capabilities set on linux systems.
 
+## URL parameters
+Everything is set in the query part of the URL, parameters can be combined.
+
+| Parameter | Meaning | Default |
+|---|---|---|
+| port of the URL / `nfsport` | port of the NFS service | asks the portmapper |
+| `mountport` | port of the mount service | asks the portmapper |
+| `portmapport` | port of the portmapper | 111 |
+| `transport` | `tcp` or `udp` | `tcp` |
+| `privport` | `1` to use a source port below 1024 | off |
+| `uid`, `gid` | user and group id presented to the server (AUTH_SYS) | 0 |
+| `gids` | comma separated list of auxiliary group ids | none |
+| `machinename` | client name presented to the server | `anfs` |
+| `timeout` | timeout in seconds | 10 |
+| `fragsize` | max size of an RPC fragment sent over TCP | 1048576 |
+
+Examples:  
+`anfsclient 'nfs://10.0.0.1/?uid=1000&gid=1000'` - be the user with id 1000. The server takes our word for it.  
+`anfsclient 'nfs://10.0.0.1:2049/?mountport=20048'` - the portmapper is firewalled but you know the ports.  
+`anfsclient 'nfs://10.0.0.1/?transport=udp'` - NFS over UDP.  
+
+# Testing
+The `lab` directory has a docker based test lab with two different NFS servers, see [lab/README.md](lab/README.md).  
+`python3 -m pytest tests` runs the tests against it.
+
 # Kudos
 The NFSv3 structure encoding/decoding is taken from [NfsClient](https://github.com/CharmingYang0/NfsClient).  
 @philipp-tg for the copious amount of bugfixes

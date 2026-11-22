@@ -6,6 +6,7 @@
 #
 import enum
 import copy
+from urllib.parse import urlparse, parse_qs
 
 from anfs.protocol.rpc import RPC
 from anfs.protocol.portmap import Portmap
@@ -23,9 +24,33 @@ class NFS3ConnectionFactory:
 	@staticmethod
 	def from_url(connection_url):
 		target = RPCTarget.from_url(connection_url)
-		credential = AUTH_SYS()
+		credential = NFS3ConnectionFactory.authsys_from_url(connection_url)
 		#credential = UniCredential.from_url(connection_url)
 		return NFS3ConnectionFactory(credential, target)
+
+	@staticmethod
+	def authsys_from_url(connection_url):
+		"""
+		Creates an AUTH_SYS credential from the uid, gid, gids and machinename query parameters
+		"""
+		query = parse_qs(urlparse(connection_url).query)
+		uid = int(query['uid'][0]) if 'uid' in query else None
+		gid = int(query['gid'][0]) if 'gid' in query else None
+		gids = None
+		if 'gids' in query:
+			gids = [int(x) for x in ','.join(query['gids']).split(',') if x != '']
+		machinename = query['machinename'][0] if 'machinename' in query else None
+		return AUTH_SYS(machinename = machinename, uid = uid, gid = gid, gids = gids)
+
+	@staticmethod
+	def get_help(helptype:str = 'url'):
+		if helptype == 'url':
+			return 'Authentication (AUTH_SYS) related parameters -query params-:\n' + \
+				'\tuid - int - user id to present to the server (default: 0)\n' + \
+				'\tgid - int - group id to present to the server (default: 0)\n' + \
+				'\tgids - str - comma separated list of auxiliary group ids\n' + \
+				'\tmachinename - str - client machine name to present to the server (default: anfs)\n'
+		return ''
 
 	def get_credential(self) -> UniCredential:
 		"""
@@ -50,8 +75,7 @@ class NFS3ConnectionFactory:
 		Creates a portmap object
 		"""
 
-		target = self.get_target()
-		target.port = 111
+		target = self.get_target().get_portmap_target()
 		# The PORTMAP protocol is queried with AUTH_NULL - it carries no
 		# meaningful AUTH_SYS authorization and many implementations silently
 		# drop AUTH_SYS requests. NFS file operations use their own credential.
@@ -65,7 +89,7 @@ class NFS3ConnectionFactory:
 		:rtype: :class:`Mount`
 		"""
 		
-		target = self.get_target()
+		target = self.get_target().get_mount_target()
 		# mountd is queried with AUTH_NULL for the same reason as portmap above:
 		# AUTH_SYS is meant for NFS file ops, and several mountd implementations
 		# only answer AUTH_NULL (silently dropping AUTH_SYS, which manifests as a
@@ -80,7 +104,7 @@ class NFS3ConnectionFactory:
 		:rtype: :class:`NFSv3Client`
 		"""
 		cred = self.get_credential()
-		target = self.get_target()
+		target = self.get_target().get_nfs_target()
 		return NFSv3Client(root_handle, target, cred)
 
 
